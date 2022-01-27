@@ -19,6 +19,7 @@
 package org.apache.pulsar.broker.resources;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -81,6 +82,7 @@ public class TenantResources extends BaseResources<TenantInfo> {
         return getCache().exists(joinPath(BASE_POLICIES_PATH, tenantName));
     }
 
+    @Deprecated // This method will be deleted when no caller.
     public List<String> getListOfNamespaces(String tenant) throws MetadataStoreException {
         List<String> namespaces = new ArrayList<>();
 
@@ -108,6 +110,63 @@ public class TenantResources extends BaseResources<TenantInfo> {
         }
 
         return namespaces;
+    }
+
+    public CompletableFuture<List<String>> getListOfNamespacesAsync(String tenant) {
+        CompletableFuture<List<String>> result = new CompletableFuture<>();
+
+        // this will return a cluster in v1 and a namespace in v2
+        getChildrenAsync(joinPath(BASE_POLICIES_PATH, tenant)).whenComplete((clusterOrNamespaces, ex) -> {
+            if (ex != null) {
+                result.completeExceptionally(ex);
+                return;
+            }
+
+            List<String> allNamespaces = new ArrayList<>();
+            clusterOrNamespaces
+                    .stream()
+                    .map(clusterOrNamespace -> getChildrenAsync(joinPath(BASE_POLICIES_PATH, tenant,
+                            clusterOrNamespace)).thenCompose((children) -> {
+                        if (children == null || children.isEmpty()) {
+                            String namespace = NamespaceName.get(tenant, clusterOrNamespace).toString();
+                            // if the length is 0 then this is probably a leftover cluster from namespace created
+                            // with the v1 admin format (prop/cluster/ns) and then deleted, so no need to add it to
+                            // the list
+                            CompletableFuture<List<String>> future = new CompletableFuture<>();
+                            getAsync(joinPath(BASE_POLICIES_PATH, namespace)).whenComplete((tenantInfo, ex2) -> {
+                                if (ex2 != null) {
+                                    if (FutureUtil.unwrapCompletionException(
+                                            ex2) instanceof MetadataStoreException.ContentDeserializationException) {
+                                        // not a namespace node
+                                        future.complete(Collections.emptyList());
+                                    } else {
+                                        future.completeExceptionally(ex2);
+                                    }
+                                    return;
+                                }
+                                future.complete(tenantInfo.isPresent() ? Collections.singletonList(namespace) :
+                                        Collections.emptyList());
+                            });
+                            return future;
+                        }
+
+                        return CompletableFuture.completedFuture(children.stream().map(ns ->
+                                        NamespaceName.get(tenant, clusterOrNamespace, ns).toString())
+                                .collect(Collectors.toList()));
+                    }))
+                    .reduce(CompletableFuture.completedFuture(null), (left, n) -> left.thenCompose((namespace) -> {
+                        allNamespaces.addAll(namespace);
+                        return n;
+                    })).whenComplete((__, ex3) -> {
+                        if (ex3 != null) {
+                            result.completeExceptionally(ex3);
+                            return;
+                        }
+                        result.complete(allNamespaces);
+                    });
+        });
+
+        return result;
     }
 
     public CompletableFuture<List<String>> getActiveNamespaces(String tenant, String cluster) {

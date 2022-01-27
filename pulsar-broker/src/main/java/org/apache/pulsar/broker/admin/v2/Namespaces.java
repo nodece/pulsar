@@ -85,8 +85,13 @@ public class Namespaces extends NamespacesBase {
             response = String.class, responseContainer = "Set")
     @ApiResponses(value = {@ApiResponse(code = 403, message = "Don't have admin permission"),
             @ApiResponse(code = 404, message = "Tenant doesn't exist")})
-    public List<String> getTenantNamespaces(@PathParam("tenant") String tenant) {
-        return internalGetTenantNamespaces(tenant);
+    public void getTenantNamespaces(@PathParam("tenant") String tenant, @Suspended AsyncResponse asyncResponse) {
+        internalGetTenantNamespacesAsync(tenant).thenAccept(asyncResponse::resume)
+                .exceptionally(ex -> {
+                    log.error("Failed to get namespace list for tenant {}", tenant, ex);
+                    asyncResponse.resume(ex);
+                    return null;
+                });
     }
 
     @GET

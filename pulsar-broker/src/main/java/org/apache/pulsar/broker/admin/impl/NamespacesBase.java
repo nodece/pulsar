@@ -106,7 +106,7 @@ import org.slf4j.LoggerFactory;
 
 public abstract class NamespacesBase extends AdminResource {
 
-    protected List<String> internalGetTenantNamespaces(String tenant) {
+    protected CompletableFuture<List<String>> internalGetTenantNamespacesAsync(String tenant) {
         checkNotNull(tenant, "Tenant should not be null");
         try {
             NamedEntity.checkName(tenant);
@@ -114,18 +114,14 @@ public abstract class NamespacesBase extends AdminResource {
             log.warn("[{}] Tenant name is invalid {}", clientAppId(), tenant, e);
             throw new RestException(Status.PRECONDITION_FAILED, "Tenant name is not valid");
         }
-        validateTenantOperation(tenant, TenantOperation.LIST_NAMESPACES);
 
-        try {
-            if (!tenantResources().tenantExists(tenant)) {
-                throw new RestException(Status.NOT_FOUND, "Tenant not found");
-            }
-
-            return tenantResources().getListOfNamespaces(tenant);
-        } catch (Exception e) {
-            log.error("[{}] Failed to get namespaces list: {}", clientAppId(), e);
-            throw new RestException(e);
-        }
+        return validateTenantOperationAsync(tenant, TenantOperation.LIST_NAMESPACES)
+                .thenCompose((__) -> tenantResources().tenantExistsAsync(tenant).thenCompose((exist) -> {
+                    if (!exist) {
+                        throw new RestException(Status.NOT_FOUND, "Tenant not found");
+                    }
+                    return tenantResources().getListOfNamespacesAsync(tenant);
+                }));
     }
 
     protected void internalCreateNamespace(Policies policies) {
