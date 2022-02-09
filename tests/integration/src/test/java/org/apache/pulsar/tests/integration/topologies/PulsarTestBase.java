@@ -46,6 +46,10 @@ public abstract class PulsarTestBase extends TestRetrySupport {
         };
     }
 
+    public static String randomName() {
+        return randomName(6);
+    }
+
     public static String randomName(int numChars) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < numChars; i++) {

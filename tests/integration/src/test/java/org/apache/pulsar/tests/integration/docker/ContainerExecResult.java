@@ -18,6 +18,8 @@
  */
 package org.apache.pulsar.tests.integration.docker;
 
+import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNotEquals;
 import static org.testng.Assert.assertTrue;
 import lombok.Data;
 
@@ -44,5 +46,13 @@ public class ContainerExecResult {
     public void assertNoStderr() {
         assertTrue(stderr.isEmpty(),
                 "stderr should be empty, but was '" + stderr + "'");
+    }
+
+    public void assertZeroExitCode() {
+        assertEquals(exitCode, 0);
+    }
+
+    public void assertNonZeroExitCode() {
+        assertNotEquals(exitCode, 0);
     }
 }

@@ -18,6 +18,7 @@
  */
 package org.apache.pulsar.tests.integration.topologies;
 
+import com.google.gson.Gson;
 import java.util.function.Supplier;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.client.admin.PulsarAdmin;
@@ -29,6 +30,8 @@ import static java.util.stream.Collectors.joining;
 
 @Slf4j
 public abstract class PulsarClusterTestBase extends PulsarTestBase {
+    protected final Gson gson = new Gson();
+
     @Override
     protected final void setup() throws Exception {
         setupCluster();
