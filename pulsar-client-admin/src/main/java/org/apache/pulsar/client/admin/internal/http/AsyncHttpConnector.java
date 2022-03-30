@@ -20,7 +20,6 @@ package org.apache.pulsar.client.admin.internal.http;
 
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponse;
-import io.netty.handler.ssl.SslContext;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -36,7 +35,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 import java.util.function.Supplier;
-import javax.net.ssl.SSLContext;
 import javax.ws.rs.client.Client;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.Response.Status;
@@ -46,13 +44,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.pulsar.PulsarVersion;
 import org.apache.pulsar.client.admin.internal.PulsarAdminImpl;
-import org.apache.pulsar.client.api.AuthenticationDataProvider;
-import org.apache.pulsar.client.api.KeyStoreParams;
 import org.apache.pulsar.client.impl.PulsarServiceNameResolver;
 import org.apache.pulsar.client.impl.conf.ClientConfigurationData;
 import org.apache.pulsar.common.util.FutureUtil;
-import org.apache.pulsar.common.util.SecurityUtility;
-import org.apache.pulsar.common.util.keystoretls.KeyStoreSSLContext;
 import org.asynchttpclient.AsyncHttpClient;
 import org.asynchttpclient.BoundRequestBuilder;
 import org.asynchttpclient.DefaultAsyncHttpClient;
@@ -80,7 +74,7 @@ public class AsyncHttpConnector implements Connector {
     private final int maxRetries;
     private final PulsarServiceNameResolver serviceNameResolver;
     private final ScheduledExecutorService delayer = Executors.newScheduledThreadPool(1,
-            new DefaultThreadFactory("delayer"));
+            new DefaultThreadFactory("client-admin-delayer"));
 
     public AsyncHttpConnector(Client client, ClientConfigurationData conf, int autoCertRefreshTimeSeconds) {
         this((int) client.getConfiguration().getProperty(ClientProperties.CONNECT_TIMEOUT),
@@ -116,44 +110,11 @@ public class AsyncHttpConnector implements Connector {
         if (conf != null && StringUtils.isNotBlank(conf.getServiceUrl())) {
             serviceNameResolver.updateServiceUrl(conf.getServiceUrl());
             if (conf.getServiceUrl().startsWith("https://")) {
-                // Set client key and certificate if available
-                AuthenticationDataProvider authData = conf.getAuthentication().getAuthData();
-
                 if (conf.isUseKeyStoreTls()) {
-                    KeyStoreParams params = authData.hasDataForTls() ? authData.getTlsKeyStoreParams() : null;
-
-                    final SSLContext sslCtx = KeyStoreSSLContext.createClientSslContext(
-                            conf.getSslProvider(),
-                            params != null ? params.getKeyStoreType() : null,
-                            params != null ? params.getKeyStorePath() : null,
-                            params != null ? params.getKeyStorePassword() : null,
-                            conf.isTlsAllowInsecureConnection() || !conf.isTlsHostnameVerificationEnable(),
-                            conf.getTlsTrustStoreType(),
-                            conf.getTlsTrustStorePath(),
-                            conf.getTlsTrustStorePassword(),
-                            conf.getTlsCiphers(),
-                            conf.getTlsProtocols());
-
-                    JsseSslEngineFactory sslEngineFactory = new JsseSslEngineFactory(sslCtx);
+                    JsseSslEngineFactory sslEngineFactory = new JsseSslEngineFactory(conf.newKeyStoreSslContext());
                     confBuilder.setSslEngineFactory(sslEngineFactory);
                 } else {
-                    SslContext sslCtx = null;
-                    if (authData.hasDataForTls()) {
-                        sslCtx = authData.getTlsTrustStoreStream() == null
-                                ? SecurityUtility.createAutoRefreshSslContextForClient(
-                                        conf.isTlsAllowInsecureConnection() || !conf.isTlsHostnameVerificationEnable(),
-                                        conf.getTlsTrustCertsFilePath(), authData.getTlsCerificateFilePath(),
-                                        authData.getTlsPrivateKeyFilePath(), null, autoCertRefreshTimeSeconds, delayer)
-                                : SecurityUtility.createNettySslContextForClient(
-                                        conf.isTlsAllowInsecureConnection() || !conf.isTlsHostnameVerificationEnable(),
-                                        authData.getTlsTrustStoreStream(), authData.getTlsCertificates(),
-                                        authData.getTlsPrivateKey());
-                    } else {
-                        sslCtx = SecurityUtility.createNettySslContextForClient(
-                                conf.isTlsAllowInsecureConnection() || !conf.isTlsHostnameVerificationEnable(),
-                                conf.getTlsTrustCertsFilePath());
-                    }
-                    confBuilder.setSslContext(sslCtx);
+                    confBuilder.setSslContext(conf.newSslContext(autoCertRefreshTimeSeconds, delayer));
                 }
             }
         }

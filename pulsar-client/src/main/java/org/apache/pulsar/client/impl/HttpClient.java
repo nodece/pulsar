@@ -21,7 +21,7 @@ package org.apache.pulsar.client.impl;
 import io.netty.channel.EventLoopGroup;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponse;
-import io.netty.handler.ssl.SslContext;
+import io.netty.util.concurrent.DefaultThreadFactory;
 import java.io.Closeable;
 import java.io.IOException;
 import java.net.HttpURLConnection;
@@ -32,18 +32,16 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import javax.net.ssl.SSLContext;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.PulsarVersion;
 import org.apache.pulsar.client.api.Authentication;
 import org.apache.pulsar.client.api.AuthenticationDataProvider;
-import org.apache.pulsar.client.api.KeyStoreParams;
 import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.client.api.PulsarClientException.NotFoundException;
 import org.apache.pulsar.client.impl.conf.ClientConfigurationData;
 import org.apache.pulsar.common.util.ObjectMapperFactory;
-import org.apache.pulsar.common.util.SecurityUtility;
-import org.apache.pulsar.common.util.keystoretls.KeyStoreSSLContext;
 import org.asynchttpclient.AsyncHttpClient;
 import org.asynchttpclient.AsyncHttpClientConfig;
 import org.asynchttpclient.BoundRequestBuilder;
@@ -63,6 +61,8 @@ public class HttpClient implements Closeable {
     protected final AsyncHttpClient httpClient;
     protected final ServiceNameResolver serviceNameResolver;
     protected final Authentication authentication;
+    private final ScheduledExecutorService delayer = Executors.newScheduledThreadPool(1,
+            new DefaultThreadFactory("client-delayer"));
 
     protected HttpClient(ClientConfigurationData conf, EventLoopGroup eventLoopGroup) throws PulsarClientException {
         this.authentication = conf.getAuthentication();
@@ -87,43 +87,11 @@ public class HttpClient implements Closeable {
 
         if ("https".equals(serviceNameResolver.getServiceUri().getServiceName())) {
             try {
-                // Set client key and certificate if available
-                AuthenticationDataProvider authData = authentication.getAuthData();
-
                 if (conf.isUseKeyStoreTls()) {
-                    SSLContext sslCtx = null;
-                    KeyStoreParams params = authData.hasDataForTls() ? authData.getTlsKeyStoreParams() : null;
-
-                    sslCtx = KeyStoreSSLContext.createClientSslContext(
-                            conf.getSslProvider(),
-                            params != null ? params.getKeyStoreType() : null,
-                            params != null ? params.getKeyStorePath() : null,
-                            params != null ? params.getKeyStorePassword() : null,
-                            conf.isTlsAllowInsecureConnection(),
-                            conf.getTlsTrustStoreType(),
-                            conf.getTlsTrustStorePath(),
-                            conf.getTlsTrustStorePassword(),
-                            conf.getTlsCiphers(),
-                            conf.getTlsProtocols());
-
-                    JsseSslEngineFactory sslEngineFactory = new JsseSslEngineFactory(sslCtx);
+                    JsseSslEngineFactory sslEngineFactory = new JsseSslEngineFactory(conf.newKeyStoreSslContext());
                     confBuilder.setSslEngineFactory(sslEngineFactory);
                 } else {
-                    SslContext sslCtx = null;
-                    if (authData.hasDataForTls()) {
-                        sslCtx = authData.getTlsTrustStoreStream() == null
-                                ? SecurityUtility.createNettySslContextForClient(conf.isTlsAllowInsecureConnection(),
-                                        conf.getTlsTrustCertsFilePath(), authData.getTlsCertificates(),
-                                        authData.getTlsPrivateKey())
-                                : SecurityUtility.createNettySslContextForClient(conf.isTlsAllowInsecureConnection(),
-                                        authData.getTlsTrustStoreStream(), authData.getTlsCertificates(),
-                                        authData.getTlsPrivateKey());
-                    } else {
-                        sslCtx = SecurityUtility.createNettySslContextForClient(
-                                conf.isTlsAllowInsecureConnection(),
-                                conf.getTlsTrustCertsFilePath());
-                    }
-                    confBuilder.setSslContext(sslCtx);
+                    confBuilder.setSslContext(conf.newSslContext(300, delayer));
                 }
 
                 confBuilder.setUseInsecureTrustManager(conf.isTlsAllowInsecureConnection());
