@@ -306,8 +306,6 @@ public class SecurityUtility {
         KeyManager[] keyManagers = null;
 
         trustManagers = setupTrustCerts(ksh, allowInsecureConnection, trustCertficates, CONSCRYPT_PROVIDER);
-        keyManagers = setupKeyManager(ksh, privateKey, certificates);
-
         SSLContext sslCtx = CONSCRYPT_PROVIDER != null ? SSLContext.getInstance("TLS", CONSCRYPT_PROVIDER)
                 : SSLContext.getInstance("TLS");
         sslCtx.init(keyManagers, trustManagers, new SecureRandom());
@@ -315,7 +313,7 @@ public class SecurityUtility {
         return sslCtx;
     }
 
-    private static KeyManager[] setupKeyManager(KeyStoreHolder ksh, PrivateKey privateKey, Certificate[] certificates)
+    public static KeyManager[] setupKeyManager(KeyStoreHolder ksh, PrivateKey privateKey, Certificate[] certificates)
             throws KeyStoreException, NoSuchAlgorithmException, UnrecoverableKeyException {
         KeyManager[] keyManagers = null;
         if (certificates != null && privateKey != null) {
@@ -327,7 +325,7 @@ public class SecurityUtility {
         return keyManagers;
     }
 
-    private static TrustManager[] setupTrustCerts(KeyStoreHolder ksh, boolean allowInsecureConnection,
+    public static TrustManager[] setupTrustCerts(KeyStoreHolder ksh, boolean allowInsecureConnection,
                                                   Certificate[] trustCertficates, Provider securityProvider)
             throws NoSuchAlgorithmException, KeyStoreException {
         TrustManager[] trustManagers;
