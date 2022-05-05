@@ -18,8 +18,7 @@
  */
 package org.apache.pulsar.client.impl;
 
-import static org.apache.pulsar.common.util.SecurityUtility.getProvider;
-import java.security.Provider;
+import com.google.common.io.Resources;
 import java.util.Collections;
 import org.apache.pulsar.common.util.keystoretls.KeyStoreSSLContext;
 import org.apache.pulsar.common.util.keystoretls.SSLContextValidatorEngine;
@@ -27,29 +26,24 @@ import org.testng.annotations.Test;
 
 @Test(groups = "broker-impl")
 public class KeyStoreTlsTest {
-
     protected final String BROKER_KEYSTORE_FILE_PATH =
-            "./src/test/resources/authentication/keystoretls/broker.keystore.jks";
+            Resources.getResource("certificate-authority/jks/broker.keystore.jks").getPath();
     protected final String BROKER_TRUSTSTORE_FILE_PATH =
-            "./src/test/resources/authentication/keystoretls/broker.truststore.jks";
+            Resources.getResource("certificate-authority/jks/broker.truststore.jks").getPath();
+    protected final String BROKER_TRUSTSTORE_NO_PW_FILE_PATH =
+            Resources.getResource("certificate-authority/jks/broker.truststore.nopassword.jks").getPath();
     protected final String BROKER_KEYSTORE_PW = "111111";
     protected final String BROKER_TRUSTSTORE_PW = "111111";
 
     protected final String CLIENT_KEYSTORE_FILE_PATH =
-            "./src/test/resources/authentication/keystoretls/client.keystore.jks";
+            Resources.getResource("certificate-authority/jks/client.keystore.jks").getPath();
     protected final String CLIENT_TRUSTSTORE_FILE_PATH =
-            "./src/test/resources/authentication/keystoretls/client.truststore.jks";
+            Resources.getResource("certificate-authority/jks/client.truststore.jks").getPath();
+    protected final String CLIENT_TRUSTSTORE_NO_PW_FILE_PATH =
+            Resources.getResource("certificate-authority/jks/client.truststore.nopassword.jks").getPath();
     protected final String CLIENT_KEYSTORE_PW = "111111";
     protected final String CLIENT_TRUSTSTORE_PW = "111111";
     protected final String KEYSTORE_TYPE = "JKS";
-
-    protected final String BROKER_TRUSTSTORE_FILE_NPD_PATH =
-            "./src/test/resources/authentication/keystoretls/pulsar_server_trust_npd.jks";
-
-    protected final String CLIENT_TRUSTSTORE_FILE_NPD_PATH =
-            "./src/test/resources/authentication/keystoretls/pulsar_client_trust_npd.jks";
-
-    public static final Provider BC_PROVIDER = getProvider();
 
     @Test(timeOut = 300000)
     public void testValidate() throws Exception {
@@ -94,7 +88,7 @@ public class KeyStoreTlsTest {
                 BROKER_KEYSTORE_PW,
                 false,
                 KEYSTORE_TYPE,
-                BROKER_TRUSTSTORE_FILE_NPD_PATH,
+                BROKER_TRUSTSTORE_NO_PW_FILE_PATH,
                 null,
                 true,
                 null,
@@ -108,7 +102,7 @@ public class KeyStoreTlsTest {
                 CLIENT_KEYSTORE_PW,
                 false,
                 KEYSTORE_TYPE,
-                CLIENT_TRUSTSTORE_FILE_NPD_PATH,
+                CLIENT_TRUSTSTORE_NO_PW_FILE_PATH,
                 null,
                 false,
                 null,

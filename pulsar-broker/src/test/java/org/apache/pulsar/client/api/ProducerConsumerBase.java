@@ -20,6 +20,7 @@ package org.apache.pulsar.client.api;
 
 import com.google.common.collect.Sets;
 
+import com.google.common.io.Resources;
 import java.lang.reflect.Method;
 import java.util.Random;
 import java.util.Set;
@@ -31,6 +32,25 @@ import org.testng.Assert;
 import org.testng.annotations.BeforeMethod;
 
 public abstract class ProducerConsumerBase extends MockedPulsarServiceBaseTest {
+    protected final String BROKER_KEYSTORE_FILE_PATH =
+            Resources.getResource("certificate-authority/jks/broker.keystore.jks").getPath();
+    protected final String BROKER_TRUSTSTORE_FILE_PATH =
+            Resources.getResource("certificate-authority/jks/broker.truststore.jks").getPath();
+    protected final String BROKER_KEYSTORE_PW = "111111";
+    protected final String BROKER_TRUSTSTORE_PW = "111111";
+
+    protected final String CLIENT_KEYSTORE_FILE_PATH =
+            Resources.getResource("certificate-authority/jks/client.keystore.jks").getPath();
+    protected final String CLIENT_TRUSTSTORE_FILE_PATH =
+            Resources.getResource("certificate-authority/jks/client.truststore.jks").getPath();
+    protected final String CLIENT_KEYSTORE_PW = "111111";
+    protected final String CLIENT_TRUSTSTORE_PW = "111111";
+
+    protected final String CLIENT_KEYSTORE_CN = "clientuser";
+    protected final String KEYSTORE_TYPE = "JKS";
+
+    protected final String clusterName = "test";
+
     protected String methodName;
 
     @BeforeMethod(alwaysRun = true)

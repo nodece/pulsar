@@ -25,6 +25,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 import com.google.common.collect.Sets;
+import com.google.common.io.Resources;
 import com.google.common.util.concurrent.MoreExecutors;
 import io.netty.channel.EventLoopGroup;
 import java.lang.reflect.Field;
@@ -74,6 +75,22 @@ import org.slf4j.LoggerFactory;
  * Base class for all tests that need a Pulsar instance without a ZK and BK cluster.
  */
 public abstract class MockedPulsarServiceBaseTest extends TestRetrySupport {
+    protected final String BROKER_KEYSTORE_FILE_PATH =
+            Resources.getResource("certificate-authority/jks/broker.keystore.jks").getPath();
+    protected final String BROKER_TRUSTSTORE_FILE_PATH =
+            Resources.getResource("certificate-authority/jks/broker.truststore.jks").getPath();
+    protected final String BROKER_KEYSTORE_PW = "111111";
+    protected final String BROKER_TRUSTSTORE_PW = "111111";
+
+    protected final String CLIENT_KEYSTORE_FILE_PATH =
+            Resources.getResource("certificate-authority/jks/client.keystore.jks").getPath();
+    protected final String CLIENT_TRUSTSTORE_FILE_PATH =
+            Resources.getResource("certificate-authority/jks/client.truststore.jks").getPath();
+    protected final String CLIENT_KEYSTORE_PW = "111111";
+    protected final String CLIENT_TRUSTSTORE_PW = "111111";
+
+    protected final String CLIENT_KEYSTORE_CN = "clientuser";
+    protected final String KEYSTORE_TYPE = "JKS";
 
     protected final String DUMMY_VALUE = "DUMMY_VALUE";
     protected final String GLOBAL_DUMMY_VALUE = "GLOBAL_DUMMY_VALUE";
