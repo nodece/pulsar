@@ -218,7 +218,7 @@ public class PulsarCluster {
         Iterator<BrokerContainer> brokers = getBrokers().iterator();
         while (brokers.hasNext()) {
             BrokerContainer broker = brokers.next();
-            multiUrl += broker.getContainerIpAddress() + ":" + broker.getMappedPort(BROKER_HTTP_PORT);
+            multiUrl += broker.getHost() + ":" + broker.getMappedPort(BROKER_HTTP_PORT);
             if (brokers.hasNext()) {
                 multiUrl += ",";
             }
@@ -227,11 +227,11 @@ public class PulsarCluster {
     }
 
     public String getZKConnString() {
-        return zkContainer.getContainerIpAddress() + ":" + zkContainer.getMappedPort(ZK_PORT);
+        return zkContainer.getHost() + ":" + zkContainer.getMappedPort(ZK_PORT);
     }
 
     public String getCSConnString() {
-        return csContainer.getContainerIpAddress() + ":" + csContainer.getMappedPort(CS_PORT);
+        return csContainer.getHost() + ":" + csContainer.getMappedPort(CS_PORT);
     }
 
     public Network getNetwork() {
