@@ -1462,6 +1462,16 @@ public class ServiceConfiguration implements PulsarConfiguration {
     private String brokerClientTrustCertsFilePath = "";
 
     @FieldContext(
+        category = CATEGORY_AUTHENTICATION,
+        doc = "Path for the TLS private key file for outgoing connection to a server (broker)")
+    private String brokerClientKeyFilePath = "";
+
+    @FieldContext(
+        category = CATEGORY_AUTHENTICATION,
+        doc = "Path for the TLS certificate file for outgoing connection to a server (broker)")
+    private String brokerClientCertificateFilePath = "";
+
+    @FieldContext(
         category = CATEGORY_AUTHORIZATION,
         doc = "When this parameter is not empty, unauthenticated users perform as anonymousUserRole"
     )
@@ -2850,6 +2860,27 @@ public class ServiceConfiguration implements PulsarConfiguration {
     )
     @ToString.Exclude
     private String brokerClientTlsTrustStorePassword = null;
+
+    @FieldContext(
+            category = CATEGORY_KEYSTORE_TLS,
+            doc = "TLS KeyStore type configuration for internal client: JKS, PKCS12 "
+                  + " used by the internal client to authenticate with Pulsar brokers"
+    )
+    private String brokerClientTlsKeyStoreType = "JKS";
+    @FieldContext(
+            category = CATEGORY_KEYSTORE_TLS,
+            doc = "TLS KeyStore path for internal client, "
+                  + " used by the internal client to authenticate with Pulsar brokers"
+    )
+    private String brokerClientTlsKeyStore = null;
+    @FieldContext(
+            category = CATEGORY_KEYSTORE_TLS,
+            doc = "TLS KeyStore password for internal client, "
+                  + " used by the internal client to authenticate with Pulsar brokers"
+    )
+    @ToString.Exclude
+    private String brokerClientTlsKeyStorePassword = null;
+
     @FieldContext(
             category = CATEGORY_KEYSTORE_TLS,
             doc = "Specify the tls cipher the internal client will use to negotiate during TLS Handshake"

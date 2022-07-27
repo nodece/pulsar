@@ -224,11 +224,18 @@ brokerServiceCompactionThresholdInBytes|If the estimated backlog size is greater
 |tlsKeyStoreType| LS KeyStore type configuration in broker: JKS, PKCS12 |JKS|
 |tlsKeyStore| TLS KeyStore path in broker ||
 |tlsKeyStorePassword| TLS KeyStore password for broker ||
+| brokerClientTlsEnabled | Enable TLS when talking with other brokers in the same cluster (admin operation) or different clusters (replication) | false |
 |brokerClientTlsEnabledWithKeyStore| Whether internal client use KeyStore type to authenticate with Pulsar brokers |false|
-|brokerClientSslProvider| The TLS Provider used by internal client to authenticate with other Pulsar brokers ||
+| brokerClientTrustCertsFilePath | Path for the trusted TLS certificate file for outgoing connection to a server (broker) ||
+| brokerClientKeyFilePath | Path for the TLS private key file for outgoing connection to a server (broker) ||
+| brokerClientCertificateFilePath | Path for the TLS certificate file for outgoing connection to a server (broker)||
 |brokerClientTlsTrustStoreType| TLS TrustStore type configuration for internal client: JKS, PKCS12, used by the internal client to authenticate with Pulsar brokers |JKS|
 |brokerClientTlsTrustStore| TLS TrustStore path for internal client, used by the internal client to authenticate with Pulsar brokers ||
 |brokerClientTlsTrustStorePassword| TLS TrustStore password for internal client, used by the internal client to authenticate with Pulsar brokers ||
+|brokerClientTlsKeyStoreType| TLS KeyStore type configuration for internal client: JKS, PKCS12, used by the internal client to authenticate with Pulsar brokers |JKS|
+|brokerClientTlsKeyStore| TLS KeyStore path for internal client, used by the internal client to authenticate with Pulsar brokers ||
+|brokerClientTlsKeyStorePassword| TLS KeyStore password for internal client, used by the internal client to authenticate with Pulsar brokers ||
+|brokerClientSslProvider| The TLS Provider used by internal client to authenticate with other Pulsar brokers ||
 |brokerClientTlsCiphers| Specify the tls cipher the internal client will use to negotiate during TLS Handshake. (a comma-separated list of ciphers) e.g.  [TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256]||
 |brokerClientTlsProtocols|Specify the tls protocols the broker will use to negotiate during TLS handshake. (a comma-separated list of protocol names). e.g.  `TLSv1.3`, `TLSv1.2` ||
 | metadataStoreBatchingEnabled | Enable metadata operations batching. | true |
@@ -599,11 +606,18 @@ You can set the log level and configuration in the  [log4j2.yaml](https://github
 | tlsTrustStoreType | TLS TrustStore type configuration in the broker<li>JKS </li><li>PKCS12 </li>|JKS|
 | tlsTrustStore | TLS TrustStore path in the broker. | |
 | tlsTrustStorePassword | TLS TrustStore password for the broker. | |
-| brokerClientTlsEnabledWithKeyStore | Configure whether the internal client uses the KeyStore type to authenticate with Pulsar brokers. | false |
-| brokerClientSslProvider | The TLS Provider used by the internal client to authenticate with other Pulsar brokers. | |
-| brokerClientTlsTrustStoreType | TLS TrustStore type configuration for the internal client to authenticate with Pulsar brokers. <li>JKS </li><li>PKCS12 </li>| JKS |
-| brokerClientTlsTrustStore | TLS TrustStore path for the internal client to authenticate with Pulsar brokers. | |
-| brokerClientTlsTrustStorePassword | TLS TrustStore password for the internal client to authenticate with Pulsar brokers. | |
+| brokerClientTlsEnabled | Enable TLS when talking with other brokers in the same cluster (admin operation) or different clusters (replication) | false |
+|brokerClientTlsEnabledWithKeyStore| Whether internal client use KeyStore type to authenticate with Pulsar brokers |false|
+| brokerClientTrustCertsFilePath | Path for the trusted TLS certificate file for outgoing connection to a server (broker) ||
+| brokerClientKeyFilePath | Path for the TLS private key file for outgoing connection to a server (broker) ||
+| brokerClientCertificateFilePath | Path for the TLS certificate file for outgoing connection to a server (broker)||
+|brokerClientTlsTrustStoreType| TLS TrustStore type configuration for internal client: JKS, PKCS12, used by the internal client to authenticate with Pulsar brokers |JKS|
+|brokerClientTlsTrustStore| TLS TrustStore path for internal client, used by the internal client to authenticate with Pulsar brokers ||
+|brokerClientTlsTrustStorePassword| TLS TrustStore password for internal client, used by the internal client to authenticate with Pulsar brokers ||
+|brokerClientTlsKeyStoreType| TLS KeyStore type configuration for internal client: JKS, PKCS12, used by the internal client to authenticate with Pulsar brokers |JKS|
+|brokerClientTlsKeyStore| TLS KeyStore path for internal client, used by the internal client to authenticate with Pulsar brokers ||
+|brokerClientTlsKeyStorePassword| TLS KeyStore password for internal client, used by the internal client to authenticate with Pulsar brokers ||
+|brokerClientSslProvider| The TLS Provider used by internal client to authenticate with other Pulsar brokers ||
 | brokerClientTlsCiphers | Specify the TLS cipher that the internal client uses to negotiate during TLS Handshake. | |
 | brokerClientTlsProtocols | Specify the TLS protocols that the broker uses to negotiate during TLS handshake. | |
 | systemTopicEnabled | Enable/Disable system topics. | false |
