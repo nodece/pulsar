@@ -127,7 +127,8 @@ flexible messaging model and an intuitive client API.</description>
     <reflections.version>0.9.11</reflections.version>
     <swagger.version>1.6.10</swagger.version>
     <puppycrawl.checkstyle.version>8.37</puppycrawl.checkstyle.version>
-    <dockerfile-maven.version>1.4.13</dockerfile-maven.version>
+    <docker-maven.version>0.40.2</docker-maven.version>
+    <docker.verbose>true</docker.verbose>
     <typetools.version>0.5.0</typetools.version>
     <byte-buddy.version>1.14.12</byte-buddy.version>
     <zt-zip.version>1.17</zt-zip.version>
@@ -1909,6 +1910,11 @@ flexible messaging model and an intuitive client API.</description>
           <groupId>org.codehaus.mojo</groupId>
           <artifactId>properties-maven-plugin</artifactId>
           <version>${properties-maven-plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>io.fabric8</groupId>
+          <artifactId>docker-maven-plugin</artifactId>
+          <version>${docker-maven.version}</version>
         </plugin>
       </plugins>
     </pluginManagement>
