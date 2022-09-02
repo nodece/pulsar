@@ -67,11 +67,13 @@ jobs:
           echo "Build Python3.9 client library"
           pulsar-client-cpp/docker-build-python3.9.sh
 
-      - name: Local build python client
+      - uses: actions/setup-python@v4
         if: ${{ steps.check_changes.outputs.docs_only != 'true' }}
-        uses: actions/setup-python@v4
         with:
           python-version: '3.9'
+        
+      - name: Local build python client
+        if: ${{ steps.check_changes.outputs.docs_only != 'true' }}
         working-directory: pulsar-client-cpp/python
         run: |
           echo "Local build python client library"
