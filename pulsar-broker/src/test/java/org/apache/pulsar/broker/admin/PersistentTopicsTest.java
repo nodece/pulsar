@@ -110,6 +110,7 @@ public class PersistentTopicsTest extends MockedPulsarServiceBaseTest {
     private final String testTenant = "my-tenant";
     private final String testLocalCluster = "use";
     private final String testNamespace = "my-namespace";
+    private final String testNamespaceLocal = "my-namespace-local";
     protected Field uriField;
     protected UriInfo uriInfo;
     private NonPersistentTopics nonPersistentTopic;
@@ -157,6 +158,7 @@ public class PersistentTopicsTest extends MockedPulsarServiceBaseTest {
         admin.tenants().createTenant(this.testTenant,
                 new TenantInfoImpl(Sets.newHashSet("role1", "role2"), Sets.newHashSet(testLocalCluster, "test")));
         admin.namespaces().createNamespace(testTenant + "/" + testNamespace, Sets.newHashSet(testLocalCluster, "test"));
+        admin.namespaces().createNamespace(testTenant + "/" + testNamespaceLocal);
     }
 
     @Override
@@ -555,7 +557,7 @@ public class PersistentTopicsTest extends MockedPulsarServiceBaseTest {
         Assert.assertEquals(errCaptor.getValue().getResponse().getStatus(), Response.Status.CONFLICT.getStatusCode());
     }
 
-    @Test(expectedExceptions = RestException.class)
+    @Test
     public void testUpdatePartitionedTopicHavingNonPartitionTopicWithPartitionSuffix() throws Exception {
         // Already have non partition topic special-topic-partition-10, shouldn't able to update number of partitioned topic to more than 10.
         final String nonPartitionTopicName2 = "special-topic-partition-10";
@@ -573,8 +575,14 @@ public class PersistentTopicsTest extends MockedPulsarServiceBaseTest {
         persistentTopics.createPartitionedTopic(response, testTenant, testNamespace, partitionedTopicName, 5, true);
         verify(response, timeout(5000).times(1)).resume(responseCaptor.capture());
         Assert.assertEquals(responseCaptor.getValue().getStatus(), Response.Status.NO_CONTENT.getStatusCode());
-        persistentTopics.updatePartitionedTopic(testTenant, testNamespace, partitionedTopicName, false, false, false,
+
+        response = mock(AsyncResponse.class);
+        ArgumentCaptor<RestException> errorCaptor = ArgumentCaptor.forClass(RestException.class);
+        persistentTopics.updatePartitionedTopic(response, testTenant, testNamespace, partitionedTopicName, false, false,
+                false,
                 10);
+        verify(response, timeout(5000).times(1)).resume(errorCaptor.capture());
+        Assert.assertEquals(responseCaptor.getValue().getStatus(), Response.Status.NO_CONTENT.getStatusCode());
     }
 
     @Test(timeOut = 10_000)
@@ -1284,6 +1292,62 @@ public class PersistentTopicsTest extends MockedPulsarServiceBaseTest {
             String errorMsg = ((InternalServerErrorException) e.getCause()).getResponse().readEntity(String.class);
             Assert.assertTrue(errorMsg.contains("TimeoutException"));
         }
+    }
+
+    @Test
+    public void testUpdatePartitionedTopic()
+            throws KeeperException, InterruptedException, PulsarAdminException {
+        String topicName = "testUpdatePartitionedTopic";
+        String groupName = "cg_testUpdatePartitionedTopic";
+        AsyncResponse response = mock(AsyncResponse.class);
+        ArgumentCaptor<Response> responseCaptor = ArgumentCaptor.forClass(Response.class);
+        persistentTopics.createPartitionedTopic(response, testTenant, testNamespaceLocal, topicName, 2, true);
+        verify(response, timeout(5000).times(1)).resume(responseCaptor.capture());
+        Assert.assertEquals(responseCaptor.getValue().getStatus(), Response.Status.NO_CONTENT.getStatusCode());
+
+        response = mock(AsyncResponse.class);
+        persistentTopics.createSubscription(response, testTenant, testNamespaceLocal, topicName, groupName, true,
+                new ResetCursorData(MessageId.latest), false);
+        responseCaptor = ArgumentCaptor.forClass(Response.class);
+        verify(response, timeout(5000).times(1)).resume(responseCaptor.capture());
+        Assert.assertEquals(responseCaptor.getValue().getStatus(), Response.Status.NO_CONTENT.getStatusCode());
+
+        response = mock(AsyncResponse.class);
+        ArgumentCaptor<PartitionedTopicMetadata> metaCaptor = ArgumentCaptor.forClass(PartitionedTopicMetadata.class);
+        persistentTopics.getPartitionedMetadata(response, testTenant, testNamespaceLocal, topicName, true, false);
+        verify(response, timeout(5000).times(1)).resume(metaCaptor.capture());
+        PartitionedTopicMetadata partitionedTopicMetadata = metaCaptor.getValue();
+        Assert.assertEquals(partitionedTopicMetadata.partitions, 2);
+
+        doNothing().when(persistentTopics).validatePartitionedTopicName(any(), any(), any());
+        response = mock(AsyncResponse.class);
+        responseCaptor = ArgumentCaptor.forClass(Response.class);
+        persistentTopics.updatePartitionedTopic(response, testTenant, testNamespaceLocal, topicName, false, true,
+                true, 4);
+        verify(response, timeout(5000).times(1)).resume(responseCaptor.capture());
+
+        response = mock(AsyncResponse.class);
+        metaCaptor = ArgumentCaptor.forClass(PartitionedTopicMetadata.class);
+        persistentTopics.getPartitionedMetadata(response, testTenant, testNamespaceLocal, topicName, true, false);
+        verify(response, timeout(5000).times(1)).resume(metaCaptor.capture());
+        partitionedTopicMetadata = metaCaptor.getValue();
+        Assert.assertEquals(partitionedTopicMetadata.partitions, 4);
+
+        // check number of new partitions must be greater than existing number of partitions
+        response = mock(AsyncResponse.class);
+        ArgumentCaptor<Throwable> throwableCaptor = ArgumentCaptor.forClass(Throwable.class);
+        persistentTopics.updatePartitionedTopic(response, testTenant, testNamespaceLocal, topicName, false, true,
+                true, 3);
+        verify(response, timeout(5000).times(1)).resume(throwableCaptor.capture());
+        Assert.assertEquals(throwableCaptor.getValue().getMessage(),
+                "Expect partitions 3 can't less than current partitions 4.");
+
+        response = mock(AsyncResponse.class);
+        metaCaptor = ArgumentCaptor.forClass(PartitionedTopicMetadata.class);
+        persistentTopics.getPartitionedMetadata(response, testTenant, testNamespaceLocal, topicName, true, false);
+        verify(response, timeout(5000).times(1)).resume(metaCaptor.capture());
+        partitionedTopicMetadata = metaCaptor.getValue();
+        Assert.assertEquals(partitionedTopicMetadata.partitions, 4);
     }
 
     @Test

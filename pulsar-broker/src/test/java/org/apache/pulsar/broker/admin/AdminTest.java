@@ -914,8 +914,13 @@ public class AdminTest extends MockedPulsarServiceBaseTest {
         verify(response2, timeout(5000).times(1)).resume(responseCaptor.capture());
         Assert.assertEquals(responseCaptor.getValue().getStatus(), Response.Status.NO_CONTENT.getStatusCode());
 
-        persistentTopics.updatePartitionedTopic(property, cluster, namespace, partitionedTopicName2, false, false,
+        AsyncResponse response3 = mock(AsyncResponse.class);
+        responseCaptor = ArgumentCaptor.forClass(Response.class);
+        persistentTopics.updatePartitionedTopic(response3, property, cluster, namespace, partitionedTopicName2, false,
+                false,
                 false, 10);
+        verify(response3, timeout(5000).times(1)).resume(responseCaptor.capture());
+        Assert.assertEquals(responseCaptor.getValue().getStatus(), Status.NO_CONTENT.getStatusCode());
     }
 
     @Test
