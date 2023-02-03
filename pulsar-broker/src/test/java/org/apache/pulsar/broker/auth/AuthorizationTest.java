@@ -23,7 +23,6 @@ import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertThrows;
 import static org.testng.Assert.assertTrue;
-import static org.testng.Assert.fail;
 import com.google.common.collect.Sets;
 import java.util.EnumSet;
 import org.apache.pulsar.broker.authorization.AuthorizationService;
