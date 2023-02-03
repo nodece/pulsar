@@ -544,7 +544,7 @@ public class PersistentTopicTest extends MockedBookKeeperTestCase {
 
     private void testMaxProducers() throws Exception {
         PersistentTopic topic = new PersistentTopic(successTopicName, ledgerMock, brokerService);
-        topic.initialize();
+        topic.initialize().join();
         String role = "appid1";
         // 1. add producer1
         Producer producer = new Producer(topic, serverCnx, 1 /* producer id */, "prod-name1", role,
@@ -2319,7 +2319,7 @@ public class PersistentTopicTest extends MockedBookKeeperTestCase {
     @Test
     public void testGetReplicationClusters() throws Exception {
         PersistentTopic topic = new PersistentTopic(successTopicName, ledgerMock, brokerService);
-        topic.initialize();
+        topic.initialize().join();
         assertEquals(topic.getHierarchyTopicPolicies().getReplicationClusters().get(), Collections.emptyList());
 
         PulsarResources pulsarResources = spyWithClassAndConstructorArgs(PulsarResources.class, store, store);
@@ -2338,7 +2338,7 @@ public class PersistentTopicTest extends MockedBookKeeperTestCase {
         doReturn(policiesFuture).when(nsr).getPoliciesAsync(any());
 
         topic = new PersistentTopic(successTopicName, ledgerMock, brokerService);
-        topic.initialize();
+        topic.initialize().join();
         assertEquals(topic.getHierarchyTopicPolicies().getReplicationClusters().get(), namespaceClusters);
 
         TopicPoliciesService topicPoliciesService = mock(TopicPoliciesService.class);
@@ -2353,7 +2353,7 @@ public class PersistentTopicTest extends MockedBookKeeperTestCase {
         when(topicPoliciesService.getTopicPoliciesIfExists(any())).thenReturn(topicPolicies);
 
         topic = new PersistentTopic(successTopicName, ledgerMock, brokerService);
-        topic.initialize();
+        topic.initialize().join();
         assertEquals(topic.getHierarchyTopicPolicies().getReplicationClusters().get(), namespaceClusters);
     }
 }
