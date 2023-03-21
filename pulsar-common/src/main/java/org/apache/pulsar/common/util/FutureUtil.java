@@ -28,6 +28,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -35,6 +36,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import javax.annotation.Nonnull;
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -259,6 +261,30 @@ public class FutureUtil {
         future.whenComplete((res, exception) -> scheduledFuture.cancel(false));
         return future;
     }
+
+    /**
+     * @throws RejectedExecutionException if this task cannot be accepted for execution
+     * @throws NullPointerException if one of params is null
+     */
+    public static <T> @Nonnull CompletableFuture<T> composeAsync(Supplier<CompletableFuture<T>> futureSupplier,
+                                                                 Executor executor) {
+        Objects.requireNonNull(futureSupplier);
+        Objects.requireNonNull(executor);
+        final CompletableFuture<T> future = new CompletableFuture<>();
+        try {
+            executor.execute(() -> futureSupplier.get().whenComplete((result, error) -> {
+                if (error != null) {
+                    future.completeExceptionally(error);
+                    return;
+                }
+                future.complete(result);
+            }));
+        } catch (RejectedExecutionException ex) {
+            future.completeExceptionally(ex);
+        }
+        return future;
+    }
+
 
     /**
      * Creates a low-overhead timeout exception which is performance optimized to minimize allocations
