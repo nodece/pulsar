@@ -91,6 +91,12 @@ flexible messaging model and an intuitive client API.</description>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
     <redirectTestOutputToFile>true</redirectTestOutputToFile>
+
+    <!-- By default build for local Docker platform.
+         To create multi-arch image, pass -Ddocker.platforms=linux/arm64,linux/amd64
+    -->
+    <docker.platforms></docker.platforms>
+
     <test.additional.args></test.additional.args>
     <testReuseFork>true</testReuseFork>
     <testForkCount>4</testForkCount>
@@ -129,7 +135,7 @@ flexible messaging model and an intuitive client API.</description>
     <reflections.version>0.9.11</reflections.version>
     <swagger.version>1.6.10</swagger.version>
     <puppycrawl.checkstyle.version>8.37</puppycrawl.checkstyle.version>
-    <docker-maven.version>0.40.2</docker-maven.version>
+    <docker-maven.version>0.42.1</docker-maven.version>
     <docker.verbose>true</docker.verbose>
     <typetools.version>0.5.0</typetools.version>
     <byte-buddy.version>1.14.12</byte-buddy.version>
