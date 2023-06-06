@@ -253,6 +253,7 @@
           </execution>
         </executions>
         <configuration>
+          <skip>false</skip>
           <useNativeGit>true</useNativeGit>
           <prefix>git</prefix>
           <verbose>false</verbose>
