@@ -1766,12 +1766,12 @@ public class PulsarService implements AutoCloseable, ShutdownService {
                                     AuthorizationService authorizationService)
             throws Exception {
         if (functionWorkerService.isPresent()) {
-            if (workerConfig.isUseTls() || brokerServiceUrl == null) {
+            if (brokerServiceUrlTls != null) {
                 workerConfig.setPulsarServiceUrl(brokerServiceUrlTls);
             } else {
                 workerConfig.setPulsarServiceUrl(brokerServiceUrl);
             }
-            if (workerConfig.isUseTls() || webServiceAddress == null) {
+            if (webServiceAddressTls != null) {
                 workerConfig.setPulsarWebServiceUrl(webServiceAddressTls);
                 workerConfig.setFunctionWebServiceUrl(webServiceAddressTls);
             } else {
@@ -1866,7 +1866,6 @@ public class PulsarService implements AutoCloseable, ShutdownService {
         workerConfig.setMetadataStoreOperationTimeoutSeconds(brokerConfig.getMetadataStoreOperationTimeoutSeconds());
         workerConfig.setMetadataStoreCacheExpirySeconds(brokerConfig.getMetadataStoreCacheExpirySeconds());
         workerConfig.setTlsAllowInsecureConnection(brokerConfig.isTlsAllowInsecureConnection());
-        workerConfig.setTlsEnabled(brokerConfig.isTlsEnabled());
         workerConfig.setTlsEnableHostnameVerification(brokerConfig.isTlsHostnameVerificationEnabled());
         workerConfig.setBrokerClientTrustCertsFilePath(brokerConfig.getBrokerClientTrustCertsFilePath());
         workerConfig.setTlsTrustCertsFilePath(brokerConfig.getTlsTrustCertsFilePath());
