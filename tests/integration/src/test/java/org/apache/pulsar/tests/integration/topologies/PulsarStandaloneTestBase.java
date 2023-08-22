@@ -113,6 +113,8 @@ public abstract class PulsarStandaloneTestBase extends PulsarTestBase {
             .withEnv("PULSAR_PREFIX_brokerClientKeyFilePath",
                     "/pulsar/certificate-authority/client-keys/admin.key-pk8.pem")
             .withEnv("PULSAR_PREFIX_brokerClientTrustCertsFilePath", "/pulsar/certificate-authority/certs/ca.cert.pem")
+            .withEnv("PULSAR_PREFIX_brokerClientAuthenticationPlugin",
+                    "org.apache.pulsar.client.impl.auth.AuthenticationTls")
             .withEnv("PULSAR_PREFIX_brokerClientAuthenticationParameters",
                     "{\"tlsCertFile\":\"/pulsar/certificate-authority/client-keys/admin.cert.pem\","
                             + "\"tlsKeyFile\":\"/pulsar/certificate-authority/client-keys/admin.key-pk8.pem\"}")
