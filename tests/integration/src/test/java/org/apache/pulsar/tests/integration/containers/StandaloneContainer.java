@@ -42,7 +42,7 @@ public class StandaloneContainer extends PulsarContainer<StandaloneContainer> {
         super(clusterName,
                 NAME,
                 NAME + "-cluster",
-                "/bin/sh",
+                "/bin/pulsar",
                 BROKER_PORT,
                 BROKER_HTTP_PORT,
                 "",
