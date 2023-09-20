@@ -34,6 +34,8 @@ public class StandaloneWithTlsTransportTest extends PulsarStandaloneTestSuite {
         @Cleanup PulsarAdmin admin = PulsarAdmin.builder()
                 .serviceHttpUrl(container.getHttpsServiceUrl())
                 .tlsTrustCertsFilePath(clientTlsTrustCertsFilePath)
+                .tlsKeyFilePath(clientTlsKeyFilePath)
+                .tlsCertificateFilePath(clientTlsCertificateFilePath)
                 .authentication(new AuthenticationTls(clientTlsCertificateFilePath, clientTlsKeyFilePath))
                 .build();
 
