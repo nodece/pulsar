@@ -32,17 +32,17 @@ public class StandaloneContainer extends PulsarContainer<StandaloneContainer> {
 
     public StandaloneContainer(String clusterName) {
         super(clusterName,
-                NAME,
-                NAME + "-cluster",
-                "bin/pulsar",
-                BROKER_PORT,
-                BROKER_HTTP_PORT);
+            NAME,
+            NAME + "-cluster",
+            "bin/pulsar",
+            BROKER_PORT,
+            BROKER_HTTP_PORT);
     }
     public StandaloneContainer(String clusterName, String pulsarImageName) {
         super(clusterName,
                 NAME,
                 NAME + "-cluster",
-                "/bin/pulsar",
+                "bin/pulsar",
                 BROKER_PORT,
                 BROKER_HTTP_PORT,
                 "",
