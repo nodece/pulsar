@@ -41,8 +41,8 @@ import org.apache.pulsar.broker.service.ServerCnx;
 import org.apache.pulsar.broker.service.Subscription;
 import org.apache.pulsar.broker.service.Topic;
 import org.apache.pulsar.common.api.proto.BaseCommand;
-import org.apache.pulsar.common.api.proto.MessageMetadata;
 import org.apache.pulsar.common.api.proto.CommandAck;
+import org.apache.pulsar.common.api.proto.MessageMetadata;
 import org.apache.pulsar.common.intercept.InterceptException;
 import org.eclipse.jetty.server.Response;
 
@@ -55,7 +55,8 @@ public class CounterBrokerInterceptor implements BrokerInterceptor {
     private AtomicInteger connectionCreationCount = new AtomicInteger();
     private AtomicInteger producerCount = new AtomicInteger();
     private AtomicInteger consumerCount = new AtomicInteger();
-    private AtomicInteger messageCount = new AtomicInteger();
+    private AtomicInteger messagePublishCount = new AtomicInteger();
+    private AtomicInteger messageProducedCount = new AtomicInteger();
     private AtomicInteger messageDispatchCount = new AtomicInteger();
     private AtomicInteger messageAckCount = new AtomicInteger();
 
@@ -65,7 +66,8 @@ public class CounterBrokerInterceptor implements BrokerInterceptor {
         connectionCreationCount.set(0);
         producerCount.set(0);
         consumerCount.set(0);
-        messageCount.set(0);
+        messagePublishCount.set(0);
+        messageProducedCount.set(0);
         messageDispatchCount.set(0);
         messageAckCount.set(0);
     }
@@ -109,6 +111,15 @@ public class CounterBrokerInterceptor implements BrokerInterceptor {
     }
 
     @Override
+    public void onMessagePublish(Producer producer, ByteBuf headersAndPayload, Topic.PublishContext publishContext) {
+        if (log.isDebugEnabled()) {
+            log.debug("Message publish topic={}, producer={}",
+                    producer.getTopic().getName(), producer.getProducerName());
+        }
+        messagePublishCount.incrementAndGet();
+    }
+
+    @Override
     public void messageProduced(ServerCnx cnx, Producer producer, long startTimeNs, long ledgerId,
                                  long entryId,
                                  Topic.PublishContext publishContext) {
@@ -116,7 +127,7 @@ public class CounterBrokerInterceptor implements BrokerInterceptor {
             log.debug("Message published topic={}, producer={}",
                     producer.getTopic().getName(), producer.getProducerName());
         }
-        messageCount.incrementAndGet();
+        messageProducedCount.incrementAndGet();
     }
 
     @Override
@@ -222,7 +233,11 @@ public class CounterBrokerInterceptor implements BrokerInterceptor {
     }
 
     public int getMessagePublishCount() {
-        return messageCount.get();
+        return messagePublishCount.get();
+    }
+
+    public int getMessageProducedCount() {
+        return messageProducedCount.get();
     }
 
     public int getMessageDispatchCount() {

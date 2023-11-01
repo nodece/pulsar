@@ -90,6 +90,18 @@ public interface BrokerInterceptor extends AutoCloseable {
     }
 
     /**
+     * Intercept message when broker receive a send request.
+     *
+     * @param headersAndPayload entry's header and payload
+     * @param publishContext Publish Context
+     */
+    default void onMessagePublish(Producer producer,
+                                  ByteBuf headersAndPayload,
+                                  Topic.PublishContext publishContext) {
+
+    }
+
+    /**
      * Intercept after a message is produced.
      *
      * @param cnx client Connection

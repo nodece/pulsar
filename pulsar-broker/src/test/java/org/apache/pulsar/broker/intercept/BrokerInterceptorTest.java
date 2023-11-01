@@ -18,6 +18,18 @@
  */
 package org.apache.pulsar.broker.intercept;
 
+import static org.mockito.ArgumentMatchers.same;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.testng.Assert.assertEquals;
+
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import lombok.Cleanup;
 import okhttp3.Call;
 import okhttp3.Callback;
@@ -38,19 +50,6 @@ import org.testng.Assert;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
-
-import java.io.IOException;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.CompletableFuture;
-
-import static org.mockito.ArgumentMatchers.same;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.testng.Assert.assertEquals;
 
 @Test(groups = "broker")
 public class BrokerInterceptorTest extends ProducerConsumerBase {
@@ -170,10 +169,10 @@ public class BrokerInterceptorTest extends ProducerConsumerBase {
             .subscriptionName("test")
             .subscribe();
 
-        assertEquals(((CounterBrokerInterceptor)listener).getMessagePublishCount(),0);
+        assertEquals(((CounterBrokerInterceptor)listener).getMessageProducedCount(),0);
         assertEquals(((CounterBrokerInterceptor)listener).getMessageDispatchCount(),0);
         producer.send("hello world");
-        assertEquals(((CounterBrokerInterceptor)listener).getMessagePublishCount(),1);
+        assertEquals(((CounterBrokerInterceptor)listener).getMessageProducedCount(),1);
 
         Message<String> msg = consumer.receive();
 
@@ -243,4 +242,19 @@ public class BrokerInterceptorTest extends ProducerConsumerBase {
         }
     }
 
+    @Test
+    public void testOnMessagePublish() throws PulsarClientException {
+        BrokerInterceptor listener = pulsar.getBrokerInterceptor();
+        Assert.assertTrue(listener instanceof CounterBrokerInterceptor);
+
+        @Cleanup
+        Producer<String> producer = pulsarClient.newProducer(Schema.STRING)
+                .topic("test-on-message-publish")
+                .create();
+        producer.send("hello world");
+
+        Awaitility.await().untilAsserted(() -> {
+            assertEquals(((CounterBrokerInterceptor) listener).getMessagePublishCount(), 1);
+        });
+    }
 }
