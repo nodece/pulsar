@@ -249,18 +249,24 @@ public class Producer {
 
     private void publishMessageToTopic(ByteBuf headersAndPayload, long sequenceId, long batchSize, boolean isChunked,
                                        boolean isMarker) {
-        topic.publishMessage(headersAndPayload,
-                MessagePublishContext.get(this, sequenceId, msgIn,
-                        headersAndPayload.readableBytes(), batchSize,
-                        isChunked, System.nanoTime(), isMarker));
+        MessagePublishContext messagePublishContext = MessagePublishContext.get(this, sequenceId, msgIn,
+                headersAndPayload.readableBytes(), batchSize,
+                isChunked, System.nanoTime(), isMarker);
+        if (brokerInterceptor != null) {
+            brokerInterceptor.onMessagePublish(this, headersAndPayload, messagePublishContext);
+        }
+        topic.publishMessage(headersAndPayload, messagePublishContext);
     }
 
     private void publishMessageToTopic(ByteBuf headersAndPayload, long lowestSequenceId, long highestSequenceId,
                                        long batchSize, boolean isChunked, boolean isMarker) {
-        topic.publishMessage(headersAndPayload,
-                MessagePublishContext.get(this, lowestSequenceId,
-                        highestSequenceId, msgIn, headersAndPayload.readableBytes(), batchSize,
-                        isChunked, System.nanoTime(), isMarker));
+        MessagePublishContext messagePublishContext = MessagePublishContext.get(this, lowestSequenceId,
+                highestSequenceId, msgIn, headersAndPayload.readableBytes(), batchSize,
+                isChunked, System.nanoTime(), isMarker);
+        if (brokerInterceptor != null) {
+            brokerInterceptor.onMessagePublish(this, headersAndPayload, messagePublishContext);
+        }
+        topic.publishMessage(headersAndPayload, messagePublishContext);
     }
 
     private boolean verifyChecksum(ByteBuf headersAndPayload) {
@@ -733,9 +739,12 @@ public class Producer {
     public void publishTxnMessage(TxnID txnID, long producerId, long sequenceId, long highSequenceId,
                                   ByteBuf headersAndPayload, long batchSize, boolean isChunked, boolean isMarker) {
         checkAndStartPublish(producerId, sequenceId, headersAndPayload, batchSize);
-        topic.publishTxnMessage(txnID, headersAndPayload,
-                MessagePublishContext.get(this, sequenceId, highSequenceId, msgIn,
-                        headersAndPayload.readableBytes(), batchSize, isChunked, System.nanoTime(), isMarker));
+        MessagePublishContext messagePublishContext = MessagePublishContext.get(this, sequenceId, highSequenceId, msgIn,
+                headersAndPayload.readableBytes(), batchSize, isChunked, System.nanoTime(), isMarker);
+        if (brokerInterceptor != null) {
+            brokerInterceptor.onMessagePublish(this, headersAndPayload, messagePublishContext);
+        }
+        topic.publishTxnMessage(txnID, headersAndPayload, messagePublishContext);
     }
 
     public SchemaVersion getSchemaVersion() {
