@@ -64,6 +64,14 @@ public class BrokerInterceptorWithClassLoader implements BrokerInterceptor {
     }
 
     @Override
+    public void onMessagePublish(Producer producer, ByteBuf headersAndPayload,
+                                 Topic.PublishContext publishContext) {
+        try (ClassLoaderSwitcher ignored = new ClassLoaderSwitcher(classLoader)) {
+            this.interceptor.onMessagePublish(producer, headersAndPayload, publishContext);
+        }
+    }
+
+    @Override
     public void producerCreated(ServerCnx cnx, Producer producer,
                                 Map<String, String> metadata){
         try (ClassLoaderSwitcher ignored = new ClassLoaderSwitcher(classLoader)) {

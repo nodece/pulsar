@@ -55,6 +55,7 @@ public class CounterBrokerInterceptor implements BrokerInterceptor {
     private AtomicInteger connectionCreationCount = new AtomicInteger();
     private AtomicInteger producerCount = new AtomicInteger();
     private AtomicInteger consumerCount = new AtomicInteger();
+    private AtomicInteger messagePublishCount = new AtomicInteger();
     private AtomicInteger messageCount = new AtomicInteger();
     private AtomicInteger messageDispatchCount = new AtomicInteger();
     private AtomicInteger messageAckCount = new AtomicInteger();
@@ -106,6 +107,15 @@ public class CounterBrokerInterceptor implements BrokerInterceptor {
                     consumer.consumerName(), consumer.consumerId());
         }
         consumerCount.incrementAndGet();
+    }
+
+    @Override
+    public void onMessagePublish(Producer producer, ByteBuf headersAndPayload, Topic.PublishContext publishContext) {
+        if (log.isDebugEnabled()) {
+            log.debug("Message broker received topic={}, producer={}",
+                    producer.getTopic().getName(), producer.getProducerName());
+        }
+        messagePublishCount.incrementAndGet();
     }
 
     @Override
@@ -222,6 +232,10 @@ public class CounterBrokerInterceptor implements BrokerInterceptor {
     }
 
     public int getMessagePublishCount() {
+        return messagePublishCount.get();
+    }
+
+    public int getMessageProducedCount() {
         return messageCount.get();
     }
 
