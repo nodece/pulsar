@@ -34,6 +34,7 @@ import org.apache.pulsar.broker.service.Producer;
 import org.apache.pulsar.broker.service.ServerCnx;
 import org.apache.pulsar.broker.service.Subscription;
 import org.apache.pulsar.broker.service.Topic;
+import org.apache.pulsar.broker.service.Topic.PublishContext;
 import org.apache.pulsar.common.api.proto.BaseCommand;
 import org.apache.pulsar.common.api.proto.CommandAck;
 import org.apache.pulsar.common.api.proto.MessageMetadata;
@@ -130,6 +131,16 @@ public class BrokerInterceptors implements BrokerInterceptor {
         }
         for (BrokerInterceptorWithClassLoader value : interceptors.values()) {
             value.producerCreated(cnx, producer, metadata);
+        }
+    }
+
+    @Override
+    public void onMessagePublish(Producer producer, ByteBuf headersAndPayload, PublishContext publishContext) {
+        if (interceptors == null || interceptors.isEmpty()) {
+            return;
+        }
+        for (BrokerInterceptorWithClassLoader value : interceptors.values()) {
+            value.onMessagePublish(producer, headersAndPayload, publishContext);
         }
     }
 
