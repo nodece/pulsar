@@ -1430,6 +1430,17 @@ public class PulsarAdminToolTest {
         verify(mockTopics).updateSubscriptionProperties("persistent://myprop/clust/ns1/ds1", "sub1", props);
 
         cmdTopics = new CmdTopics(() -> admin);
+        cmdTopics.run(split("update-properties persistent://myprop/clust/ns1/ds1 --property a=b -p x=y,z"));
+        props = new HashMap<>();
+        props.put("a", "b");
+        props.put("x", "y,z");
+        verify(mockTopics).updateProperties("persistent://myprop/clust/ns1/ds1", props);
+
+        cmdTopics = new CmdTopics(() -> admin);
+        cmdTopics.run(split("remove-properties persistent://myprop/clust/ns1/ds1 --key a"));
+        verify(mockTopics).removeProperties("persistent://myprop/clust/ns1/ds1", "a");
+
+        cmdTopics = new CmdTopics(() -> admin);
         cmdTopics.run(split("create-partitioned-topic persistent://myprop/clust/ns1/ds1 --partitions 32"));
         verify(mockTopics).createPartitionedTopic("persistent://myprop/clust/ns1/ds1", 32, null);
 
