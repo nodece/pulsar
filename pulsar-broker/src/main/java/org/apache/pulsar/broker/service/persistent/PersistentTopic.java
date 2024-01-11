@@ -386,7 +386,7 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
                     if (!optPolicies.isPresent()) {
                         isEncryptionRequired = false;
                         updatePublishRateLimiter();
-                        updateResourceGroupLimiter(new Policies());
+                        updateResourceGroupLimiter();
                         initializeDispatchRateLimiterIfNeeded();
                         updateSubscribeRateLimiter();
                         return;
@@ -402,7 +402,7 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
 
                     updatePublishRateLimiter();
 
-                    updateResourceGroupLimiter(policies);
+                    updateResourceGroupLimiter();
 
                     this.isEncryptionRequired = policies.encryption_required;
 
@@ -1466,6 +1466,8 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
 
                                                     unregisterTopicPolicyListener();
 
+                                                    closeResourceGroupLimiter();
+
                                                     log.info("[{}] Topic deleted", topic);
                                                     deleteFuture.complete(null);
                                                 }
@@ -1642,6 +1644,9 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
                     subscribeRateLimiter.ifPresent(SubscribeRateLimiter::close);
 
                     unregisterTopicPolicyListener();
+
+                    closeResourceGroupLimiter();
+
                     log.info("[{}] Topic closed", topic);
                     cancelFencedTopicMonitoringTask();
                     closeFuture.complete(null);
@@ -3137,7 +3142,7 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
 
         // Apply policies for components.
         List<CompletableFuture<Void>> applyPolicyTasks = applyUpdatedTopicPolicies();
-        applyPolicyTasks.add(applyUpdatedNamespacePolicies(data));
+        applyPolicyTasks.add(applyUpdatedNamespacePolicies());
         return FutureUtil.waitForAll(applyPolicyTasks)
             .thenAccept(__ -> log.info("[{}] namespace-level policies updated successfully", topic))
             .exceptionally(ex -> {
@@ -3146,8 +3151,8 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
             });
     }
 
-    private CompletableFuture<Void> applyUpdatedNamespacePolicies(Policies namespaceLevelPolicies) {
-        return FutureUtil.runWithCurrentThread(() -> updateResourceGroupLimiter(namespaceLevelPolicies));
+    private CompletableFuture<Void> applyUpdatedNamespacePolicies() {
+        return FutureUtil.runWithCurrentThread(() -> updateResourceGroupLimiter());
     }
 
     private List<CompletableFuture<Void>> applyUpdatedTopicPolicies() {
@@ -3166,6 +3171,7 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
         applyPoliciesFutureList.add(FutureUtil.runWithCurrentThread(() -> updateDispatchRateLimiter()));
         applyPoliciesFutureList.add(FutureUtil.runWithCurrentThread(() -> updateSubscribeRateLimiter()));
         applyPoliciesFutureList.add(FutureUtil.runWithCurrentThread(() -> updatePublishRateLimiter()));
+        applyPoliciesFutureList.add(FutureUtil.runWithCurrentThread(() -> updateResourceGroupLimiter()));
 
         applyPoliciesFutureList.add(FutureUtil.runWithCurrentThread(() -> updateSubscriptionsDispatcherRateLimiter()));
         applyPoliciesFutureList.add(FutureUtil.runWithCurrentThread(

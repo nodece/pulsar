@@ -86,6 +86,7 @@ public class TopicPolicies {
     private Map<String/*subscription*/, SubscriptionPolicies> subscriptionPolicies = new HashMap<>();
 
     private Boolean schemaValidationEnforced;
+    private String resourceGroupName;
 
     public boolean isGlobalPolicies() {
         return isGlobal != null && isGlobal;
