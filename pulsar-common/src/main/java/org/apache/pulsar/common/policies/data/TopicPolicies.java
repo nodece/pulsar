@@ -87,6 +87,7 @@ public class TopicPolicies {
 
     private Boolean schemaValidationEnforced;
     private String resourceGroupName;
+    private String replicationResourceGroupName;
 
     public boolean isGlobalPolicies() {
         return isGlobal != null && isGlobal;

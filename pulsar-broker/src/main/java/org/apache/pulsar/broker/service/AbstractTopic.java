@@ -255,6 +255,7 @@ public abstract class AbstractTopic implements Topic, TopicPolicyListener<TopicP
         topicPolicies.getDispatcherPauseOnAckStatePersistentEnabled()
                 .updateTopicValue(data.getDispatcherPauseOnAckStatePersistentEnabled());
         topicPolicies.getResourceGroupName().updateTopicValue(data.getResourceGroupName());
+        topicPolicies.getReplicationResourceGroupName().updateTopicValue(data.getReplicationResourceGroupName());
         this.subscriptionPolicies = data.getSubscriptionPolicies();
 
         updateEntryFilters();

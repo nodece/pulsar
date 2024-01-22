@@ -84,11 +84,7 @@ public abstract class AbstractReplicator {
         this.client = (PulsarClientImpl) brokerService.pulsar().getClient();
         this.producer = null;
         this.producerQueueSize = brokerService.pulsar().getConfiguration().getReplicationProducerQueueSize();
-        this.replicatorId = String.format("%s | %s",
-                StringUtils.equals(localTopicName, remoteTopicName) ? localTopicName :
-                        localTopicName + "-->" + remoteTopicName,
-                StringUtils.equals(localCluster, remoteCluster) ? localCluster : localCluster + "-->" + remoteCluster
-        );
+        this.replicatorId = getReplicatorId(localTopicName, remoteTopicName, localCluster, remoteCluster);
         this.producerBuilder = replicationClient.newProducer(Schema.AUTO_PRODUCE_BYTES()) //
                 .topic(remoteTopicName)
                 .messageRoutingMode(MessageRoutingMode.SinglePartition)
@@ -97,6 +93,15 @@ public abstract class AbstractReplicator {
                 .maxPendingMessages(producerQueueSize) //
                 .producerName(getProducerName());
         STATE_UPDATER.set(this, State.Stopped);
+    }
+
+    public static String getReplicatorId(String localTopicName, String remoteTopicName,
+                                         String localCluster, String remoteCluster) {
+        return String.format("%s | %s",
+                StringUtils.equals(localTopicName, remoteTopicName) ? localTopicName :
+                        localTopicName + "-->" + remoteTopicName,
+                StringUtils.equals(localCluster, remoteCluster) ? localCluster : localCluster + "-->" + remoteCluster
+        );
     }
 
     protected abstract String getProducerName();

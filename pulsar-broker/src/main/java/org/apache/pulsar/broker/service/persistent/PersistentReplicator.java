@@ -44,6 +44,9 @@ import org.apache.bookkeeper.mledger.ManagedLedgerException.TooManyRequestsExcep
 import org.apache.bookkeeper.mledger.Position;
 import org.apache.bookkeeper.mledger.impl.PositionImpl;
 import org.apache.pulsar.broker.PulsarServerException;
+import org.apache.pulsar.broker.resourcegroup.ResourceGroup;
+import org.apache.pulsar.broker.resourcegroup.ResourceGroupDispatchLimiter;
+import org.apache.pulsar.broker.resourcegroup.ResourceGroupService;
 import org.apache.pulsar.broker.service.AbstractReplicator;
 import org.apache.pulsar.broker.service.BrokerService;
 import org.apache.pulsar.broker.service.BrokerServiceException.TopicBusyException;
@@ -59,6 +62,7 @@ import org.apache.pulsar.client.impl.ProducerImpl;
 import org.apache.pulsar.client.impl.PulsarClientImpl;
 import org.apache.pulsar.client.impl.SendCallback;
 import org.apache.pulsar.common.api.proto.MarkerType;
+import org.apache.pulsar.common.policies.data.TopicPolicies;
 import org.apache.pulsar.common.policies.data.stats.ReplicatorStatsImpl;
 import org.apache.pulsar.common.schema.SchemaInfo;
 import org.apache.pulsar.common.stats.Rate;
@@ -73,6 +77,7 @@ public abstract class PersistentReplicator extends AbstractReplicator
     protected final ManagedCursor cursor;
 
     protected Optional<DispatchRateLimiter> dispatchRateLimiter = Optional.empty();
+    protected Optional<ResourceGroupDispatchLimiter> resourceGroupDispatchRateLimiter = Optional.empty();
     private final Object dispatchRateLimiterLock = new Object();
 
     private int readBatchSize;
@@ -198,13 +203,14 @@ public abstract class PersistentReplicator extends AbstractReplicator
             return 0;
         }
 
+        long availablePermitsOnMsg = -1;
+        long availablePermitsOnByte = -1;
         // handle rate limit
         if (dispatchRateLimiter.isPresent() && dispatchRateLimiter.get().isDispatchRateLimitingEnabled()) {
             DispatchRateLimiter rateLimiter = dispatchRateLimiter.get();
             // if dispatch-rate is in msg then read only msg according to available permit
-            long availablePermitsOnMsg = rateLimiter.getAvailableDispatchRateLimitOnMsg();
-            long availablePermitsOnByte = rateLimiter.getAvailableDispatchRateLimitOnByte();
-            // no permits from rate limit
+            availablePermitsOnMsg = rateLimiter.getAvailableDispatchRateLimitOnMsg();
+            availablePermitsOnByte = rateLimiter.getAvailableDispatchRateLimitOnByte();
             if (availablePermitsOnByte == 0 || availablePermitsOnMsg == 0) {
                 if (log.isDebugEnabled()) {
                     log.debug("[{}] message-read exceeded topic replicator message-rate {}/{},"
@@ -216,9 +222,29 @@ public abstract class PersistentReplicator extends AbstractReplicator
                 }
                 return -1;
             }
-            if (availablePermitsOnMsg > 0) {
-                availablePermits = Math.min(availablePermits, (int) availablePermitsOnMsg);
+        }
+
+        if (resourceGroupDispatchRateLimiter.isPresent()) {
+            ResourceGroupDispatchLimiter rateLimiter = resourceGroupDispatchRateLimiter.get();
+            availablePermitsOnMsg = Math.min(rateLimiter.getAvailableDispatchRateLimitOnMsg(),
+                    availablePermitsOnMsg);
+            availablePermitsOnByte = Math.min(rateLimiter.getAvailableDispatchRateLimitOnByte(),
+                    availablePermitsOnByte);
+            if (availablePermitsOnByte == 0 || availablePermitsOnMsg == 0) {
+                if (log.isDebugEnabled()) {
+                    log.debug("[{}] message-read exceeded resourcegroup replicator message-rate {}/{},"
+                                    + " schedule after a {}",
+                            replicatorId,
+                            rateLimiter.getDispatchRateOnMsg(),
+                            rateLimiter.getDispatchRateOnByte(),
+                            MESSAGE_RATE_BACKOFF_MS);
+                }
+                return -1;
             }
+        }
+
+        if (availablePermitsOnMsg > 0) {
+            availablePermits = Math.min(availablePermits, (int) availablePermitsOnMsg);
         }
 
         return availablePermits;
@@ -637,6 +663,25 @@ public abstract class PersistentReplicator extends AbstractReplicator
                 this.dispatchRateLimiter = Optional.of(
                         new DispatchRateLimiter(topic, Codec.decode(cursor.getName()), Type.REPLICATOR));
             }
+
+            TopicPolicies topicPolicies = topic.getTopicPolicies().orElse(null);
+            ResourceGroupService resourceGroupService = brokerService.getPulsar().getResourceGroupServiceManager();
+            if (topicPolicies != null) {
+                String resourceGroupName = topicPolicies.getReplicationResourceGroupName();
+                if (resourceGroupName != null) {
+                    resourceGroupService.unRegisterReplicator(replicatorId);
+                    ResourceGroup resourceGroup = resourceGroupService.resourceGroupGet(resourceGroupName);
+                    if (resourceGroup != null) {
+                        resourceGroupService.registerReplicator(resourceGroupName, replicatorId);
+                        resourceGroupDispatchRateLimiter = Optional.of(resourceGroup.getResourceGroupDispatchLimiter());
+                    }
+                } else {
+                    if (resourceGroupDispatchRateLimiter.isPresent()) {
+                        resourceGroupService.unRegisterReplicator(replicatorId);
+                        resourceGroupDispatchRateLimiter = Optional.empty();
+                    }
+                }
+            }
         }
     }
 
@@ -686,6 +731,10 @@ public abstract class PersistentReplicator extends AbstractReplicator
 
         super.disconnect(failIfHasBacklog).thenRun(() -> {
             dispatchRateLimiter.ifPresent(DispatchRateLimiter::close);
+            resourceGroupDispatchRateLimiter.ifPresent(limiter -> {
+                brokerService.getPulsar().getResourceGroupServiceManager().unRegisterReplicator(replicatorId);
+                limiter.close();
+            });
             future.complete(null);
         }).exceptionally(ex -> {
             Throwable t = (ex instanceof CompletionException ? ex.getCause() : ex);

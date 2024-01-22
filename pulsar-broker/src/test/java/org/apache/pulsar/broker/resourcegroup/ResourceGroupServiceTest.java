@@ -34,12 +34,12 @@ import org.apache.pulsar.common.policies.data.ClusterData;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testng.Assert;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
+import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 public class ResourceGroupServiceTest extends MockedPulsarServiceBaseTest {
-    @BeforeClass
+    @BeforeMethod
     @Override
     protected void setup() throws Exception {
         super.internalSetup();
@@ -75,7 +75,7 @@ public class ResourceGroupServiceTest extends MockedPulsarServiceBaseTest {
         this.rgs = new ResourceGroupService(pulsar, TimeUnit.MILLISECONDS, transportMgr, dummyQuotaCalc);
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterMethod(alwaysRun = true)
     @Override
     protected void cleanup() throws Exception {
         log.info("numAnonymousQuotaCalculations={}", this.numAnonymousQuotaCalculations);
@@ -268,6 +268,63 @@ public class ResourceGroupServiceTest extends MockedPulsarServiceBaseTest {
         service.close();
         Assert.assertTrue(service.getAggregateLocalUsagePeriodicTask().isCancelled());
         Assert.assertTrue(service.getCalculateQuotaPeriodicTask().isCancelled());
+    }
+
+    @Test
+    public void testReplicatorDispatch() throws PulsarAdminException {
+        String resourceGroupName = "replicator-rg-1";
+        org.apache.pulsar.common.policies.data.ResourceGroup resourceGroup =
+                new org.apache.pulsar.common.policies.data.ResourceGroup();
+        resourceGroup.setDispatchRateInBytes(100L);
+        resourceGroup.setDispatchRateInMsgs(10);
+        rgs.resourceGroupCreate(resourceGroupName, resourceGroup);
+
+        String replicatorId = "replicator-1";
+        rgs.registerReplicator(resourceGroupName, replicatorId);
+        Assert.assertEquals(rgs.getReplicatorToRGsMap().size(), 1);
+
+        int accBytes1 = 4;
+        int accMessages1 = 2;
+        rgs.updateStatsWithDiff(replicatorId, null, null, accBytes1, accMessages1, ResourceGroupMonitoringClass.Dispatch, true);
+        ResourceGroup relicatorResourceGroup = rgs.resourceGroupGet(resourceGroupName);
+        BytesAndMessagesCount localUsageStats = relicatorResourceGroup.getLocalUsageStats(ResourceGroupMonitoringClass.Dispatch);
+        Assert.assertEquals(localUsageStats.messages, accMessages1);
+        Assert.assertEquals(localUsageStats.bytes, accBytes1);
+
+        int accBytes2 = 8;
+        int accMessages2 = 4;
+        rgs.updateStatsWithDiff(replicatorId, null, null, accBytes2, accMessages2, ResourceGroupMonitoringClass.Dispatch, true);
+        relicatorResourceGroup = rgs.resourceGroupGet(resourceGroupName);
+        localUsageStats = relicatorResourceGroup.getLocalUsageStats(ResourceGroupMonitoringClass.Dispatch);
+        Assert.assertEquals(localUsageStats.messages, accMessages2);
+        Assert.assertEquals(localUsageStats.bytes, accBytes2);
+
+        ResourceGroupDispatchLimiter resourceGroupDispatchLimiter = relicatorResourceGroup.getResourceGroupDispatchLimiter();
+        Assert.assertTrue(resourceGroupDispatchLimiter.isDispatchRateLimitingEnabled());
+        Assert.assertEquals(resourceGroupDispatchLimiter.getDispatchRateOnByte(), resourceGroup.getDispatchRateInBytes());
+        Assert.assertEquals(resourceGroupDispatchLimiter.getDispatchRateOnMsg(), (long) resourceGroup.getDispatchRateInMsgs());
+        rgs.calculateQuotaForAllResourceGroups();
+        Assert.assertTrue(resourceGroupDispatchLimiter.isDispatchRateLimitingEnabled());
+        Assert.assertNotEquals(resourceGroupDispatchLimiter.getDispatchRateOnByte(), resourceGroup.getDispatchRateInBytes());
+        Assert.assertNotEquals(resourceGroupDispatchLimiter.getDispatchRateOnMsg(), (long) resourceGroup.getDispatchRateInMsgs());
+    }
+
+    @Test
+    public void testRegisterReplicator() throws PulsarAdminException {
+        String resourceGroupName = "replicator-rg-1";
+        org.apache.pulsar.common.policies.data.ResourceGroup resourceGroup =
+                new org.apache.pulsar.common.policies.data.ResourceGroup();
+        resourceGroup.setDispatchRateInBytes(100L);
+        resourceGroup.setDispatchRateInMsgs(10);
+        rgs.resourceGroupCreate(resourceGroupName, resourceGroup);
+
+        String replicatorId = "replicator-1";
+        rgs.unRegisterReplicator(replicatorId);
+        rgs.registerReplicator(resourceGroupName, replicatorId);
+        Assert.assertThrows(IllegalStateException.class, () -> rgs.registerReplicator(resourceGroupName, replicatorId));
+
+        rgs.unRegisterReplicator(replicatorId);
+        rgs.registerReplicator(resourceGroupName, replicatorId);
     }
 
     private ResourceGroupService rgs;

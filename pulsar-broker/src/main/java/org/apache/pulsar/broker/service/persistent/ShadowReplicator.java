@@ -90,6 +90,8 @@ public class ShadowReplicator extends PersistentReplicator {
                 }
 
                 dispatchRateLimiter.ifPresent(rateLimiter -> rateLimiter.consumeDispatchQuota(1, entry.getLength()));
+                resourceGroupDispatchRateLimiter.ifPresent(rateLimiter ->
+                        rateLimiter.consumeDispatchQuota(1, entry.getLength()));
 
                 msgOut.recordEvent(headersAndPayload.readableBytes());
 

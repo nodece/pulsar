@@ -147,6 +147,35 @@ public class ResourceGroupRateLimiterTest extends BrokerTestBase {
         testRateLimit();
     }
 
+    @Test
+    public void testCreateRateLimiter() throws PulsarAdminException {
+        String rg1Name = "rg-1";
+        org.apache.pulsar.common.policies.data.ResourceGroup rg1 =
+                new org.apache.pulsar.common.policies.data.ResourceGroup();
+        rg1.setPublishRateInBytes(10L);
+        rg1.setPublishRateInMsgs(20);
+        rg1.setDispatchRateInBytes(30L);
+        rg1.setDispatchRateInMsgs(40);
+
+        admin.resourcegroups().createResourceGroup(rg1Name, rg1);
+
+        Awaitility.await().ignoreExceptions().untilAsserted(() -> {
+            ResourceGroup resourceGroup = pulsar.getResourceGroupServiceManager().resourceGroupGet(rg1Name);
+            assertNotNull(resourceGroup);
+
+            ResourceGroupPublishLimiter resourceGroupPublishLimiter = resourceGroup.getResourceGroupPublishLimiter();
+            assertNotNull(resourceGroupPublishLimiter);
+            assertEquals(resourceGroupPublishLimiter.getTokenBucketOnByte().getRate(), rg1.getPublishRateInBytes());
+            assertEquals(resourceGroupPublishLimiter.getTokenBucketOnMessage().getRate(), (long) rg1.getPublishRateInMsgs());
+
+            ResourceGroupDispatchLimiter resourceGroupDispatchLimiter = resourceGroup.getResourceGroupDispatchLimiter();
+            assertNotNull(resourceGroupDispatchLimiter);
+
+            assertEquals(resourceGroupDispatchLimiter.getDispatchRateOnByte(), rg1.getDispatchRateInBytes());
+            assertEquals(resourceGroupDispatchLimiter.getDispatchRateOnMsg(), (long) rg1.getDispatchRateInMsgs());
+        });
+    }
+
     private void prepareData() {
         testAddRg.setPublishRateInBytes(Long.valueOf(MESSAGE_SIZE_SERIALIZED));
         testAddRg.setPublishRateInMsgs(1);

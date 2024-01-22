@@ -61,6 +61,7 @@ public class HierarchyTopicPolicies {
     final PolicyHierarchyValue<Boolean> schemaValidationEnforced;
     final PolicyHierarchyValue<EntryFilters> entryFilters;
     final PolicyHierarchyValue<String> resourceGroupName;
+    final PolicyHierarchyValue<String> replicationResourceGroupName;
 
     public HierarchyTopicPolicies() {
         replicationClusters = new PolicyHierarchyValue<>();
@@ -94,5 +95,6 @@ public class HierarchyTopicPolicies {
         schemaValidationEnforced = new PolicyHierarchyValue<>();
         entryFilters = new PolicyHierarchyValue<>();
         resourceGroupName = new PolicyHierarchyValue<>();
+        replicationResourceGroupName = new PolicyHierarchyValue<>();
     }
 }

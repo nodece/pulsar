@@ -137,6 +137,8 @@ public class GeoPersistentReplicator extends PersistentReplicator {
                 }
 
                 dispatchRateLimiter.ifPresent(rateLimiter -> rateLimiter.consumeDispatchQuota(1, entry.getLength()));
+                resourceGroupDispatchRateLimiter.ifPresent(rateLimiter ->
+                        rateLimiter.consumeDispatchQuota(1, entry.getLength()));
                 msg.setReplicatedFrom(localCluster);
 
                 headersAndPayload.retain();

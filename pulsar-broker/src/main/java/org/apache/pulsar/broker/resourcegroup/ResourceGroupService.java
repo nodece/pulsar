@@ -34,6 +34,7 @@ import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.resourcegroup.ResourceGroup.BytesAndMessagesCount;
 import org.apache.pulsar.broker.resourcegroup.ResourceGroup.ResourceGroupMonitoringClass;
 import org.apache.pulsar.broker.resourcegroup.ResourceGroup.ResourceGroupRefTypes;
+import org.apache.pulsar.broker.service.AbstractReplicator;
 import org.apache.pulsar.broker.service.BrokerService;
 import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.common.naming.NamespaceName;
@@ -168,14 +169,17 @@ public class ResourceGroupService implements AutoCloseable{
         long tenantRefCount = rg.getResourceGroupNumOfTenantRefs();
         long nsRefCount = rg.getResourceGroupNumOfNSRefs();
         long topicRefCount = rg.getResourceGroupNumOfTopicRefs();
-        if ((tenantRefCount + nsRefCount + topicRefCount) > 0) {
+        long replicatorRefCount = rg.getResourceGroupNumOfReplicatorRefs();
+        if ((tenantRefCount + nsRefCount + topicRefCount + replicatorRefCount) > 0) {
             String errMesg = "Resource group " + name + " still has " + tenantRefCount + " tenant refs";
             errMesg += " and " + nsRefCount + " namespace refs on it";
             errMesg += " and " + topicRefCount + " topic refs on it";
+            errMesg += " and " + replicatorRefCount + " topic refs on it";
             throw new PulsarAdminException(errMesg);
         }
 
         rg.resourceGroupPublishLimiter = null;
+        rg.resourceGroupDispatchLimiter = null;
         resourceGroupsMap.remove(name);
     }
 
@@ -334,6 +338,45 @@ public class ResourceGroupService implements AutoCloseable{
     }
 
     /**
+     * Registers a replicator as a user of a resource group.
+     *
+     * @param resourceGroupName
+     * @param replicatorName
+     */
+    public void registerReplicator(String resourceGroupName, String replicatorName) {
+        ResourceGroup rg = resourceGroupsMap.get(resourceGroupName);
+        if (rg == null) {
+            throw new IllegalStateException("Resource group does not exist: " + resourceGroupName);
+        }
+
+        ResourceGroupOpStatus status = rg.registerUsage(replicatorName, ResourceGroupRefTypes.Replicators,
+                true, this.resourceUsageTransportManagerMgr);
+        if (status == ResourceGroupOpStatus.Exists) {
+            String msg = String.format("Replicator %s already references the target resource group %s",
+                    replicatorName, resourceGroupName);
+            throw new IllegalStateException(msg);
+        }
+
+        // Associate this topic-name with the RG.
+        this.replicatorToRGsMap.put(replicatorName, rg);
+        rgReplicatorRegisters.labels(resourceGroupName).inc();
+    }
+
+    /**
+     * UnRegisters a replicator from a resource group.
+     *
+     * @param replicatorName
+     */
+    public void unRegisterReplicator(String replicatorName) {
+        ResourceGroup remove = this.replicatorToRGsMap.remove(replicatorName);
+        if (remove != null) {
+            remove.registerUsage(replicatorName, ResourceGroupRefTypes.Replicators,
+                    false, this.resourceUsageTransportManagerMgr);
+            rgReplicatorRegisters.labels(remove.resourceGroupName).inc();
+        }
+    }
+
+    /**
      * Return the resource group associated with a namespace.
      *
      * @param namespaceName
@@ -369,6 +412,17 @@ public class ResourceGroupService implements AutoCloseable{
         resourceGroup.incrementLocalUsageStats(monClass, incStats);
         rgLocalUsageBytes.labels(resourceGroup.resourceGroupName, monClass.name()).inc(incStats.bytes);
         rgLocalUsageMessages.labels(resourceGroup.resourceGroupName, monClass.name()).inc(incStats.messages);
+    }
+
+    private boolean incrementReplicatorUsage(String replicatorId, ResourceGroupMonitoringClass monClass,
+                                             BytesAndMessagesCount incStats) throws PulsarAdminException {
+        ResourceGroup resourceGroup = this.replicatorToRGsMap.get(replicatorId);
+        if (resourceGroup == null) {
+            return false;
+        }
+
+        incrementUsage(resourceGroup, monClass, incStats);
+        return true;
     }
 
     /**
@@ -493,8 +547,11 @@ public class ResourceGroupService implements AutoCloseable{
 
     // Find the difference between the last time stats were updated for this topic, and the current
     // time. If the difference is positive, update the stats.
-    private void updateStatsWithDiff(String topicName, String tenantString, String nsString,
-                                     long accByteCount, long accMesgCount, ResourceGroupMonitoringClass monClass) {
+    @VisibleForTesting
+    protected void updateStatsWithDiff(String resourceName, String tenantString, String nsString,
+                                       long accByteCount, long accMesgCount, ResourceGroupMonitoringClass monClass,
+                                       boolean isReplicator
+    ) {
         ConcurrentHashMap<String, BytesAndMessagesCount> hm;
         switch (monClass) {
             default:
@@ -517,7 +574,7 @@ public class ResourceGroupService implements AutoCloseable{
         bmNewCount.bytes = accByteCount;
         bmNewCount.messages = accMesgCount;
 
-        bmOldCount = hm.get(topicName);
+        bmOldCount = hm.get(resourceName);
         if (bmOldCount == null) {
             bmDiff.bytes = bmNewCount.bytes;
             bmDiff.messages = bmNewCount.messages;
@@ -531,14 +588,19 @@ public class ResourceGroupService implements AutoCloseable{
         }
 
         try {
-            boolean statsUpdated = this.incrementUsage(topicName, tenantString, nsString, monClass, bmDiff);
+            boolean statsUpdated;
+            if (isReplicator) {
+                statsUpdated = incrementReplicatorUsage(resourceName, monClass, bmDiff);
+            } else {
+                statsUpdated = incrementUsage(resourceName, tenantString, nsString, monClass, bmDiff);
+            }
             if (log.isDebugEnabled()) {
-                log.debug("updateStatsWithDiff for topic={}: monclass={} statsUpdated={} for tenant={}, namespace={}; "
+                log.debug("updateStatsWithDiff for resourceName={}: monclass={} statsUpdated={} for tenant={}, namespace={}; "
                                 + "by {} bytes, {} mesgs",
-                        topicName, monClass, statsUpdated, tenantString, nsString,
+                        resourceName, monClass, statsUpdated, tenantString, nsString,
                         bmDiff.bytes, bmDiff.messages);
             }
-            hm.put(topicName, bmNewCount);
+            hm.put(resourceName, bmNewCount);
         } catch (Throwable t) {
             log.error("updateStatsWithDiff: got ex={} while aggregating for {} side",
                     t.getMessage(), monClass);
@@ -630,6 +692,24 @@ public class ResourceGroupService implements AutoCloseable{
             val tenantRG = this.tenantToRGsMap.get(tenantString);
             val namespaceRG = this.namespaceToRGsMap.get(fqNamespace);
             val topicRG = this.topicToRGsMap.get(topic);
+
+            if (!this.replicatorToRGsMap.isEmpty()) {
+                String localCluster = this.pulsar.getConfiguration().getClusterName();
+                topicStats.getReplication().forEach((remoteCluster, stats) -> {
+                    String replicatorId = AbstractReplicator.getReplicatorId(topicName, topicName, localCluster,
+                            remoteCluster);
+                    ResourceGroup resourceGroup = this.replicatorToRGsMap.get(replicatorId);
+                    if (resourceGroup != null) {
+                        this.updateStatsWithDiff(replicatorId, tenantString, nsString,
+                                (long) stats.getMsgThroughputOut(),
+                                (long) stats.getMsgRateOut(),
+                                ResourceGroupMonitoringClass.Dispatch,
+                                true
+                        );
+                    }
+                });
+            }
+
             if (tenantRG == null && namespaceRG == null && topicRG == null) {
                 // This topic's NS/tenant are not registered to any RG.
                 continue;
@@ -637,10 +717,10 @@ public class ResourceGroupService implements AutoCloseable{
 
             this.updateStatsWithDiff(topicName, tenantString, nsString,
                     topicStats.getBytesInCounter(), topicStats.getMsgInCounter(),
-                    ResourceGroupMonitoringClass.Publish);
+                    ResourceGroupMonitoringClass.Publish, false);
             this.updateStatsWithDiff(topicName, tenantString, nsString,
                     topicStats.getBytesOutCounter(), topicStats.getMsgOutCounter(),
-                    ResourceGroupMonitoringClass.Dispatch);
+                    ResourceGroupMonitoringClass.Dispatch, false);
         }
         double diffTimeSeconds = aggrUsageTimer.observeDuration();
         if (log.isDebugEnabled()) {
@@ -819,6 +899,7 @@ public class ResourceGroupService implements AutoCloseable{
     // Given a qualified NS-name (i.e., in "tenant/namespace" format), record its associated resource-group
     private ConcurrentHashMap<NamespaceName, ResourceGroup> namespaceToRGsMap = new ConcurrentHashMap<>();
     private ConcurrentHashMap<TopicName, ResourceGroup> topicToRGsMap = new ConcurrentHashMap<>();
+    private ConcurrentHashMap<String, ResourceGroup> replicatorToRGsMap = new ConcurrentHashMap<>();
 
     // Maps to maintain the usage per topic, in produce/consume directions.
     private ConcurrentHashMap<String, BytesAndMessagesCount> topicProduceStats = new ConcurrentHashMap<>();
@@ -917,6 +998,12 @@ public class ResourceGroupService implements AutoCloseable{
             .labelNames(resourceGroupLabel)
             .register();
 
+    private static final Counter rgReplicatorRegisters = Counter.build()
+            .name("pulsar_resource_group_replicator_registers")
+            .help("Number of registrations of replicators")
+            .labelNames(resourceGroupLabel)
+            .register();
+
     private static final Summary rgUsageAggregationLatency = Summary.build()
             .quantile(0.5, 0.05)
             .quantile(0.9, 0.01)
@@ -939,6 +1026,11 @@ public class ResourceGroupService implements AutoCloseable{
     @VisibleForTesting
     ConcurrentHashMap getTopicProduceStats() {
         return this.topicProduceStats;
+    }
+
+    @VisibleForTesting
+    ConcurrentHashMap<String, ResourceGroup> getReplicatorToRGsMap() {
+        return replicatorToRGsMap;
     }
 
     @VisibleForTesting

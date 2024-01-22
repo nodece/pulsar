@@ -1317,6 +1317,42 @@ public class TopicPoliciesImpl extends BaseResource implements TopicPolicies {
         return setResourceGroupAsync(topic, null);
     }
 
+    @Override
+    public String getReplicationResourceGroup(String topic, boolean applied) throws PulsarAdminException {
+        return sync(() -> getReplicationResourceGroupAsync(topic, applied));
+    }
+
+    @Override
+    public CompletableFuture<String> getReplicationResourceGroupAsync(String topic, boolean applied) {
+        TopicName tn = validateTopic(topic);
+        WebTarget path = topicPath(tn, "replicationResourceGroup");
+        path = path.queryParam("applied", applied);
+        return asyncGetRequest(path, new FutureCallback<String>() {
+        });
+    }
+
+    @Override
+    public void setReplicationResourceGroup(String topic, String resourceGroupName) throws PulsarAdminException {
+        sync(() -> setReplicationResourceGroupAsync(topic, resourceGroupName));
+    }
+
+    @Override
+    public CompletableFuture<Void> setReplicationResourceGroupAsync(String topic, String resourceGroupName) {
+        TopicName tn = validateTopic(topic);
+        WebTarget path = topicPath(tn, "replicationResourceGroup");
+        return asyncPostRequest(path, Entity.entity(resourceGroupName, MediaType.APPLICATION_JSON_TYPE));
+    }
+
+    @Override
+    public void removeReplicationResourceGroup(String topic) throws PulsarAdminException {
+        sync(() -> removeReplicationResourceGroupAsync(topic));
+    }
+
+    @Override
+    public CompletableFuture<Void> removeReplicationResourceGroupAsync(String topic) {
+        return setReplicationResourceGroupAsync(topic, null);
+    }
+
     /*
      * returns topic name with encoded Local Name
      */

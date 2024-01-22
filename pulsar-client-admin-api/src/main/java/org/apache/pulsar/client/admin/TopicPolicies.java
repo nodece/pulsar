@@ -1987,4 +1987,60 @@ public interface TopicPolicies {
      * @param topic Topic name
      */
     CompletableFuture<Void> removeResourceGroupAsync(String topic);
+
+    /**
+     * Get the ReplicationResourceGroup for a topic.
+     *
+     * @param topic Topic name
+     * @param applied True gets namespace level configuration if ResourceGroup does not exist on the topic.
+     *                False gets topic level configuration.
+     * @return ResourceGroup
+     * @throws NotAuthorizedException Don't have admin permission
+     * @throws NotFoundException Topic does not exist
+     * @throws PulsarAdminException Unexpected error
+     */
+    String getReplicationResourceGroup(String topic, boolean applied) throws PulsarAdminException;
+
+    /**
+     * Get the ReplicationResourceGroup for a topic asynchronously.
+     *
+     * @param topic Topic name
+     */
+    CompletableFuture<String> getReplicationResourceGroupAsync(String topic, boolean applied);
+
+    /**
+     * Set the ReplicationResourceGroup for a topic.
+     *
+     * @param topic Topic name
+     * @param resourceGroupName ResourceGroup name
+     * @throws NotAuthorizedException Don't have admin permission
+     * @throws NotFoundException Topic does not exist
+     * @throws PulsarAdminException Unexpected error
+     */
+    void setReplicationResourceGroup(String topic, String resourceGroupName) throws PulsarAdminException;
+
+    /**
+     * Set the ReplicationResourceGroup for a topic.
+     *
+     * @param topic Topic name
+     * @param resourceGroupName ResourceGroup name
+     */
+    CompletableFuture<Void> setReplicationResourceGroupAsync(String topic, String resourceGroupName);
+
+    /**
+     * Remove the ReplicationResourceGroup on a topic.
+     *
+     * @param topic Topic name
+     * @throws NotAuthorizedException Don't have admin permission
+     * @throws NotFoundException Topic does not exist
+     * @throws PulsarAdminException Unexpected error
+     */
+    void removeReplicationResourceGroup(String topic) throws PulsarAdminException;
+
+    /**
+     * Remove the ReplicationResourceGroup on a topic asynchronously.
+     *
+     * @param topic Topic name
+     */
+    CompletableFuture<Void> removeReplicationResourceGroupAsync(String topic);
 }
