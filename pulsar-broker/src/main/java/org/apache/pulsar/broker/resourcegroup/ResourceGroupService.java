@@ -595,10 +595,9 @@ public class ResourceGroupService implements AutoCloseable{
                 statsUpdated = incrementUsage(resourceName, tenantString, nsString, monClass, bmDiff);
             }
             if (log.isDebugEnabled()) {
-                log.debug("updateStatsWithDiff for resourceName={}: monclass={} statsUpdated={} for tenant={}, namespace={}; "
-                                + "by {} bytes, {} mesgs",
-                        resourceName, monClass, statsUpdated, tenantString, nsString,
-                        bmDiff.bytes, bmDiff.messages);
+                log.debug("updateStatsWithDiff for resourceName={}: monclass={} statsUpdated={} for "
+                                + "tenant={}, namespace={}; by {} bytes, {} mesgs",
+                        resourceName, monClass, statsUpdated, tenantString, nsString, bmDiff.bytes, bmDiff.messages);
             }
             hm.put(resourceName, bmNewCount);
         } catch (Throwable t) {
