@@ -705,7 +705,8 @@ public class BookkeeperSchemaStorage implements SchemaStorage {
             message += " - entry=" + entryId;
         }
         boolean recoverable = rc != BKException.Code.NoSuchLedgerExistsException
-                && rc != BKException.Code.NoSuchEntryException;
+                && rc != BKException.Code.NoSuchEntryException
+                && rc != BKException.Code.NoSuchLedgerExistsOnMetadataServerException;
         return new SchemaException(recoverable, message);
     }
 
@@ -714,7 +715,8 @@ public class BookkeeperSchemaStorage implements SchemaStorage {
             if (t.getCause() != null
                     && (t.getCause() instanceof SchemaException)
                     && !((SchemaException) t.getCause()).isRecoverable()) {
-                // Meeting NoSuchLedgerExistsException or NoSuchEntryException when reading schemas in
+                // Meeting NoSuchLedgerExistsException, NoSuchEntryException or
+                // NoSuchLedgerExistsOnMetadataServerException when reading schemas in
                 // bookkeeper. This also means that the data has already been deleted by other operations
                 // in deleting schema.
                 if (log.isDebugEnabled()) {
