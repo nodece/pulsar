@@ -85,6 +85,9 @@ public class ResourceGroup {
                 .getMonotonicSnapshotClock());
         log.info("attaching publish rate limiter {} to {} get {}", this.resourceGroupPublishLimiter, name,
           this.getResourceGroupPublishLimiter());
+        this.resourceGroupDispatchLimiter = new ResourceGroupDispatchLimiter(rgConfig);
+        log.info("attaching dispatch rate limiter {} to {} get {}", this.resourceGroupDispatchLimiter, name,
+                this.getResourceGroupDispatchLimiter());
     }
 
     // ctor for overriding the transport-manager fill/set buffer.
@@ -99,6 +102,7 @@ public class ResourceGroup {
         this.setResourceGroupConfigParameters(rgConfig);
         this.resourceGroupPublishLimiter = new ResourceGroupPublishLimiter(rgConfig, rgs.getPulsar()
                 .getMonotonicSnapshotClock());
+        this.resourceGroupDispatchLimiter = new ResourceGroupDispatchLimiter(rgConfig);
         this.ruPublisher = rgPublisher;
         this.ruConsumer = rgConsumer;
     }
@@ -109,6 +113,7 @@ public class ResourceGroup {
         this.resourceGroupName = other.resourceGroupName;
         this.rgs = other.rgs;
         this.resourceGroupPublishLimiter = other.resourceGroupPublishLimiter;
+        this.resourceGroupDispatchLimiter = other.resourceGroupDispatchLimiter;
         this.setResourceGroupMonitoringClassFields();
 
         // ToDo: copy the monitoring class fields, and ruPublisher/ruConsumer from other, if required.
@@ -147,6 +152,7 @@ public class ResourceGroup {
         pubBmc.messages = rgConfig.getPublishRateInMsgs();
         pubBmc.bytes = rgConfig.getPublishRateInBytes();
         this.resourceGroupPublishLimiter.update(pubBmc);
+        this.resourceGroupDispatchLimiter.update(rgConfig);
     }
 
     protected long getResourceGroupNumOfNSRefs() {
@@ -353,14 +359,6 @@ public class ResourceGroup {
 
     protected BytesAndMessagesCount updateLocalQuota(ResourceGroupMonitoringClass monClass,
                                                      BytesAndMessagesCount newQuota) throws PulsarAdminException {
-        // Only the Publish side is functional now; add the Dispatch side code when the consume side is ready.
-        if (!ResourceGroupMonitoringClass.Publish.equals(monClass)) {
-            if (log.isDebugEnabled()) {
-                log.debug("Doing nothing for monClass={}; only Publish is functional", monClass);
-            }
-            return null;
-        }
-
         this.checkMonitoringClass(monClass);
         BytesAndMessagesCount oldBMCount;
 
@@ -369,7 +367,16 @@ public class ResourceGroup {
         oldBMCount = monEntity.quotaForNextPeriod;
         try {
             monEntity.quotaForNextPeriod = newQuota;
-            this.resourceGroupPublishLimiter.update(newQuota);
+            switch (monClass) {
+                case Dispatch:
+                    this.resourceGroupDispatchLimiter.update(newQuota);
+                    break;
+                case Publish:
+                    this.resourceGroupPublishLimiter.update(newQuota);
+                    break;
+                default:
+                    log.warn("Doing nothing for monClass={};", monClass);
+            }
         } finally {
             monEntity.localUsageStatsLock.unlock();
         }
@@ -641,6 +648,9 @@ public class ResourceGroup {
     // Publish rate limiter for the resource group
     @Getter
     protected ResourceGroupPublishLimiter resourceGroupPublishLimiter;
+
+    @Getter
+    protected ResourceGroupDispatchLimiter resourceGroupDispatchLimiter;
 
     protected static class PerMonitoringClassFields {
         // This lock covers all the "local" counts (i.e., except for the per-broker usage stats).
