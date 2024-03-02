@@ -19,6 +19,7 @@
 package org.apache.pulsar.admin.cli;
 
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import com.google.common.annotations.VisibleForTesting;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import lombok.Data;
@@ -53,7 +54,7 @@ public class PulsarAdminSupplier implements Supplier<PulsarAdmin> {
         }
     }
 
-    protected final PulsarAdminBuilder adminBuilder;
+    protected PulsarAdminBuilder adminBuilder;
     private RootParamsKey currentParamsKey;
     private PulsarAdmin admin;
 
@@ -91,6 +92,7 @@ public class PulsarAdminSupplier implements Supplier<PulsarAdmin> {
     @SneakyThrows
     private static void applyRootParamsToAdminBuilder(PulsarAdminBuilder adminBuilder,
                                                       PulsarAdminTool.RootParams rootParams) {
+        System.out.println("set service url: " + rootParams.serviceUrl);
         adminBuilder.serviceHttpUrl(rootParams.serviceUrl);
         adminBuilder.authentication(rootParams.authPluginClassName, rootParams.authParams);
         adminBuilder.requestTimeout(rootParams.requestTimeout, TimeUnit.SECONDS);
@@ -108,4 +110,8 @@ public class PulsarAdminSupplier implements Supplier<PulsarAdmin> {
         }
     }
 
+    @VisibleForTesting
+    public void setAdminBuilder(PulsarAdminBuilder builder){
+        this.adminBuilder = builder;
+    }
 }

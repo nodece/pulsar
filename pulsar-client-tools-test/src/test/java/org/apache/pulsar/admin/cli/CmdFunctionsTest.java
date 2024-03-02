@@ -34,8 +34,11 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.util.Arrays;
 import java.util.List;
+import lombok.Cleanup;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.admin.cli.CmdFunctions.CreateFunction;
 import org.apache.pulsar.admin.cli.CmdFunctions.DeleteFunction;
@@ -55,6 +58,7 @@ import org.apache.pulsar.functions.api.Function;
 import org.apache.pulsar.functions.api.utils.IdentityFunction;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
+import picocli.CommandLine;
 
 /**
  * Unit test of {@link CmdFunctions}.
@@ -655,17 +659,19 @@ public class CmdFunctionsTest {
 
     @Test
     public void testStateGetterWithoutKey() throws Exception {
-        ConsoleOutputCapturer consoleOutputCapturer = new ConsoleOutputCapturer();
-        consoleOutputCapturer.start();
+        CommandLine commander = cmd.getCommander();
+        @Cleanup
+        StringWriter stringWriter = new StringWriter();
+        @Cleanup
+        PrintWriter printWriter = new PrintWriter(stringWriter);
+        commander.setErr(printWriter);
         cmd.run(new String[] {
                 "querystate",
                 "--tenant", TENANT,
                 "--namespace", NAMESPACE,
                 "--name", FN_NAME,
         });
-        consoleOutputCapturer.stop();
-        String output = consoleOutputCapturer.getStderr();
-        assertTrue(output.replace("\n", "").contains("State key needs to be specified"));
+        assertTrue(stringWriter.toString().startsWith(("State key needs to be specified")));
         StateGetter stateGetter = cmd.getStateGetter();
         assertEquals(TENANT, stateGetter.getTenant());
         assertEquals(NAMESPACE, stateGetter.getNamespace());
