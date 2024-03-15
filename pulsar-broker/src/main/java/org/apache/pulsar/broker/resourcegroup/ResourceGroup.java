@@ -60,6 +60,7 @@ public class ResourceGroup {
     public enum ResourceGroupMonitoringClass {
         Publish,
         Dispatch,
+        ReplicationDispatch,
         // Storage;  // Punt this for now, until we have a clearer idea of the usage, statistics, etc.
     }
 
@@ -69,7 +70,7 @@ public class ResourceGroup {
     public enum ResourceGroupRefTypes {
         Tenants,
         Namespaces,
-        // Topics;  // Punt this for when we support direct ref/under from topics.
+        Topics
     }
 
     // Default ctor: it is not expected that anything outside of this package will need to directly
@@ -84,6 +85,13 @@ public class ResourceGroup {
         this.resourceGroupPublishLimiter = new ResourceGroupPublishLimiter(rgConfig, rgs.getPulsar().getExecutor());
         log.info("attaching publish rate limiter {} to {} get {}", this.resourceGroupPublishLimiter.toString(), name,
           this.getResourceGroupPublishLimiter());
+        this.resourceGroupReplicationDispatchLimiter = ResourceGroupRateLimiterManager
+                .newReplicationDispatchRateLimiter(rgConfig, rgs.getPulsar().getExecutor());
+        log.info("attaching replication dispatch rate limiter {} to {}", this.resourceGroupReplicationDispatchLimiter,
+                name);
+        this.resourceGroupDispatchLimiter = ResourceGroupRateLimiterManager
+                .newDispatchRateLimiter(rgConfig, rgs.getPulsar().getExecutor());
+        log.info("attaching topic dispatch rate limiter {} to {}", this.resourceGroupDispatchLimiter, name);
     }
 
     // ctor for overriding the transport-manager fill/set buffer.
@@ -97,6 +105,10 @@ public class ResourceGroup {
         this.setResourceGroupMonitoringClassFields();
         this.setResourceGroupConfigParameters(rgConfig);
         this.resourceGroupPublishLimiter = new ResourceGroupPublishLimiter(rgConfig, rgs.getPulsar().getExecutor());
+        this.resourceGroupReplicationDispatchLimiter = ResourceGroupRateLimiterManager
+                .newReplicationDispatchRateLimiter(rgConfig, rgs.getPulsar().getExecutor());
+        this.resourceGroupDispatchLimiter = ResourceGroupRateLimiterManager
+                .newDispatchRateLimiter(rgConfig, rgs.getPulsar().getExecutor());
         this.ruPublisher = rgPublisher;
         this.ruConsumer = rgConsumer;
     }
@@ -107,12 +119,15 @@ public class ResourceGroup {
         this.resourceGroupName = other.resourceGroupName;
         this.rgs = other.rgs;
         this.resourceGroupPublishLimiter = other.resourceGroupPublishLimiter;
+        this.resourceGroupReplicationDispatchLimiter = other.resourceGroupReplicationDispatchLimiter;
+        this.resourceGroupDispatchLimiter = other.resourceGroupDispatchLimiter;
         this.setResourceGroupMonitoringClassFields();
 
         // ToDo: copy the monitoring class fields, and ruPublisher/ruConsumer from other, if required.
 
         this.resourceGroupNamespaceRefs = other.resourceGroupNamespaceRefs;
         this.resourceGroupTenantRefs = other.resourceGroupTenantRefs;
+        this.resourceGroupTopicRefs = other.resourceGroupTopicRefs;
 
         for (int idx = 0; idx < ResourceGroupMonitoringClass.values().length; idx++) {
             PerMonitoringClassFields thisFields = this.monitoringClassFields[idx];
@@ -145,10 +160,17 @@ public class ResourceGroup {
         pubBmc.messages = rgConfig.getPublishRateInMsgs();
         pubBmc.bytes = rgConfig.getPublishRateInBytes();
         this.resourceGroupPublishLimiter.update(pubBmc);
+        ResourceGroupRateLimiterManager
+                .updateReplicationDispatchRateLimiter(resourceGroupReplicationDispatchLimiter, rgConfig);
+        ResourceGroupRateLimiterManager.updateDispatchRateLimiter(resourceGroupDispatchLimiter, rgConfig);
     }
 
     protected long getResourceGroupNumOfNSRefs() {
         return this.resourceGroupNamespaceRefs.size();
+    }
+
+    protected long getResourceGroupNumOfTopicRefs() {
+        return this.resourceGroupTopicRefs.size();
     }
 
     protected long getResourceGroupNumOfTenantRefs() {
@@ -168,6 +190,9 @@ public class ResourceGroup {
             case Namespaces:
                 set = this.resourceGroupNamespaceRefs;
                 break;
+            case Topics:
+                set = this.resourceGroupTopicRefs;
+                break;
         }
 
         if (ref) {
@@ -178,7 +203,8 @@ public class ResourceGroup {
             set.add(name);
 
             // If this is the first ref, register with the transport manager.
-            if (this.resourceGroupTenantRefs.size() + this.resourceGroupNamespaceRefs.size() == 1) {
+            if (this.resourceGroupTenantRefs.size() + this.resourceGroupNamespaceRefs.size()
+                    + this.resourceGroupTopicRefs.size() == 1) {
                 if (log.isDebugEnabled()) {
                     log.debug("registerUsage for RG={}: registering with transport-mgr", this.resourceGroupName);
                 }
@@ -193,7 +219,8 @@ public class ResourceGroup {
             set.remove(name);
 
             // If this was the last ref, unregister from the transport manager.
-            if (this.resourceGroupTenantRefs.size() + this.resourceGroupNamespaceRefs.size() == 0) {
+            if (this.resourceGroupTenantRefs.size() + this.resourceGroupNamespaceRefs.size()
+                    + this.resourceGroupTopicRefs.size() == 0) {
                 if (log.isDebugEnabled()) {
                     log.debug("unRegisterUsage for RG={}: un-registering from transport-mgr", this.resourceGroupName);
                 }
@@ -221,6 +248,9 @@ public class ResourceGroup {
         p = resourceUsage.setDispatch();
         this.setUsageInMonitoredEntity(ResourceGroupMonitoringClass.Dispatch, p);
 
+        p = resourceUsage.setReplicationDispatch();
+        this.setUsageInMonitoredEntity(ResourceGroupMonitoringClass.ReplicationDispatch, p);
+
         // Punt storage for now.
     }
 
@@ -233,6 +263,9 @@ public class ResourceGroup {
 
         p = resourceUsage.getDispatch();
         this.getUsageFromMonitoredEntity(ResourceGroupMonitoringClass.Dispatch, p, broker);
+
+        p = resourceUsage.getReplicationDispatch();
+        this.getUsageFromMonitoredEntity(ResourceGroupMonitoringClass.ReplicationDispatch, p, broker);
 
         // Punt storage for now.
     }
@@ -351,14 +384,6 @@ public class ResourceGroup {
 
     protected BytesAndMessagesCount updateLocalQuota(ResourceGroupMonitoringClass monClass,
                                                      BytesAndMessagesCount newQuota) throws PulsarAdminException {
-        // Only the Publish side is functional now; add the Dispatch side code when the consume side is ready.
-        if (!ResourceGroupMonitoringClass.Publish.equals(monClass)) {
-            if (log.isDebugEnabled()) {
-                log.debug("Doing nothing for monClass={}; only Publish is functional", monClass);
-            }
-            return null;
-        }
-
         this.checkMonitoringClass(monClass);
         BytesAndMessagesCount oldBMCount;
 
@@ -367,7 +392,22 @@ public class ResourceGroup {
         oldBMCount = monEntity.quotaForNextPeriod;
         try {
             monEntity.quotaForNextPeriod = newQuota;
-            this.resourceGroupPublishLimiter.update(newQuota);
+            switch (monClass) {
+                case ReplicationDispatch:
+                    ResourceGroupRateLimiterManager
+                            .updateReplicationDispatchRateLimiter(resourceGroupReplicationDispatchLimiter, newQuota);
+                    break;
+                case Publish:
+                    this.resourceGroupPublishLimiter.update(newQuota);
+                    break;
+                case Dispatch:
+                    ResourceGroupRateLimiterManager.updateDispatchRateLimiter(resourceGroupDispatchLimiter, newQuota);
+                    break;
+                default:
+                    if (log.isDebugEnabled()) {
+                        log.debug("Doing nothing for monClass={};", monClass);
+                    }
+            }
         } finally {
             monEntity.localUsageStatsLock.unlock();
         }
@@ -419,9 +459,16 @@ public class ResourceGroup {
     }
 
     private void checkMonitoringClass(ResourceGroupMonitoringClass monClass) throws PulsarAdminException {
-        if (monClass != ResourceGroupMonitoringClass.Publish && monClass != ResourceGroupMonitoringClass.Dispatch) {
-            String errMesg = "Unexpected monitoring class: " + monClass;
-            throw new PulsarAdminException(errMesg);
+        switch (monClass) {
+            case Publish:
+                break;
+            case Dispatch:
+                break;
+            case ReplicationDispatch:
+                break;
+            default:
+                String errMesg = "Unexpected monitoring class: " + monClass;
+                throw new PulsarAdminException(errMesg);
         }
     }
 
@@ -566,6 +613,14 @@ public class ResourceGroup {
                 ? -1 : rgConfig.getDispatchRateInBytes();
         this.monitoringClassFields[idx].configValuesPerPeriod.messages = rgConfig.getDispatchRateInMsgs() == null
                 ? -1 : rgConfig.getDispatchRateInMsgs();
+
+        idx = ResourceGroupMonitoringClass.ReplicationDispatch.ordinal();
+        this.monitoringClassFields[idx]
+                .configValuesPerPeriod.bytes = rgConfig.getReplicationDispatchRateInBytes() == null
+                ? -1 : rgConfig.getReplicationDispatchRateInBytes();
+        this.monitoringClassFields[idx]
+                .configValuesPerPeriod.messages = rgConfig.getReplicationDispatchRateInMsgs() == null
+                ? -1 : rgConfig.getReplicationDispatchRateInMsgs();
     }
 
     private void setDefaultResourceUsageTransportHandlers() {
@@ -606,6 +661,7 @@ public class ResourceGroup {
     // across all of its usage classes (publish/dispatch/...).
     private Set<String> resourceGroupTenantRefs = ConcurrentHashMap.newKeySet();
     private Set<String> resourceGroupNamespaceRefs = ConcurrentHashMap.newKeySet();
+    private Set<String> resourceGroupTopicRefs = ConcurrentHashMap.newKeySet();
 
     // Blobs required for transport manager's resource-usage register/unregister ops.
     ResourceUsageConsumer ruConsumer;
@@ -639,6 +695,12 @@ public class ResourceGroup {
     // Publish rate limiter for the resource group
     @Getter
     protected ResourceGroupPublishLimiter resourceGroupPublishLimiter;
+
+    @Getter
+    protected ResourceGroupDispatchLimiter resourceGroupReplicationDispatchLimiter;
+
+    @Getter
+    protected ResourceGroupDispatchLimiter resourceGroupDispatchLimiter;
 
     protected static class PerMonitoringClassFields {
         // This lock covers all the "local" counts (i.e., except for the per-broker usage stats).

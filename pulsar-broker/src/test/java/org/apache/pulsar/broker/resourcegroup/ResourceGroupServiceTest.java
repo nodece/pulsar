@@ -18,10 +18,13 @@
  */
 package org.apache.pulsar.broker.resourcegroup;
 
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import org.apache.pulsar.broker.auth.MockedPulsarServiceBaseTest;
-import org.apache.pulsar.broker.resourcegroup.ResourceGroup.ResourceGroupMonitoringClass;
-import org.apache.pulsar.broker.resourcegroup.ResourceGroup.PerMonitoringClassFields;
 import org.apache.pulsar.broker.resourcegroup.ResourceGroup.BytesAndMessagesCount;
+import org.apache.pulsar.broker.resourcegroup.ResourceGroup.PerMonitoringClassFields;
+import org.apache.pulsar.broker.resourcegroup.ResourceGroup.ResourceGroupMonitoringClass;
 import org.apache.pulsar.broker.service.resource.usage.NetworkUsage;
 import org.apache.pulsar.broker.service.resource.usage.ResourceUsage;
 import org.apache.pulsar.client.admin.PulsarAdminException;
@@ -30,13 +33,10 @@ import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.policies.data.ClusterData;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
-import org.testng.Assert;
 import org.testng.annotations.Test;
-import java.util.HashSet;
-import java.util.Set;
-import java.util.concurrent.TimeUnit;
 
 public class ResourceGroupServiceTest extends MockedPulsarServiceBaseTest {
     @BeforeClass
@@ -111,16 +111,18 @@ public class ResourceGroupServiceTest extends MockedPulsarServiceBaseTest {
                 numPerfTestIterations, diffMsecs, (1000 * (float) diffMsecs)/numPerfTestIterations);
 
         // Going through the resource-group service
-        final String tenantName = "SomeTenant";
-        final String namespaceName = "SomeNameSpace";
+        final TopicName topicName = TopicName.get("SomeTenant/SomeNameSpace/my-topic");
+        rgs.registerTopic(rgName, topicName);
+        final String tenantName = topicName.getTenant();
+        final String namespaceName = topicName.getNamespace();
         rgs.registerTenant(rgName, tenantName);
-        final NamespaceName tenantAndNamespaceName = NamespaceName.get(tenantName, namespaceName);
+        final NamespaceName tenantAndNamespaceName = topicName.getNamespaceObject();
         rgs.registerNameSpace(rgName, tenantAndNamespaceName);
         mSecsStart = System.currentTimeMillis();
         for (int ix = 0; ix < numPerfTestIterations; ix++) {
             for (int monClassIdx = 0; monClassIdx < ResourceGroupMonitoringClass.values().length; monClassIdx++) {
                 monClass = ResourceGroupMonitoringClass.values()[monClassIdx];
-                rgs.incrementUsage(tenantName, namespaceName, monClass, stats);
+                rgs.incrementUsage(tenantName, namespaceName, topicName.toString(), monClass, stats);
             }
         }
         mSecsEnd = System.currentTimeMillis();
@@ -129,6 +131,7 @@ public class ResourceGroupServiceTest extends MockedPulsarServiceBaseTest {
                 numPerfTestIterations, diffMsecs, (1000 * (float) diffMsecs)/numPerfTestIterations);
         rgs.unRegisterTenant(rgName, tenantName);
         rgs.unRegisterNameSpace(rgName, tenantAndNamespaceName);
+        rgs.unRegisterTopic(topicName);
 
         // The overhead of a RG lookup
         mSecsStart = System.currentTimeMillis();
@@ -153,6 +156,8 @@ public class ResourceGroupServiceTest extends MockedPulsarServiceBaseTest {
         rgConfig.setPublishRateInMsgs(100);
         rgConfig.setDispatchRateInBytes(40000L);
         rgConfig.setDispatchRateInMsgs(500);
+        rgConfig.setReplicationDispatchRateInBytes(2000L);
+        rgConfig.setReplicationDispatchRateInMsgs(400L);
 
         int initialNumQuotaCalculations = numAnonymousQuotaCalculations;
         rgs.resourceGroupCreate(rgName, rgConfig);
@@ -167,6 +172,8 @@ public class ResourceGroupServiceTest extends MockedPulsarServiceBaseTest {
         rgConfig.setPublishRateInMsgs(rgConfig.getPublishRateInMsgs()*10);
         rgConfig.setDispatchRateInBytes(rgConfig.getDispatchRateInBytes()/10);
         rgConfig.setDispatchRateInMsgs(rgConfig.getDispatchRateInMsgs()/10);
+        rgConfig.setReplicationDispatchRateInBytes(rgConfig.getReplicationDispatchRateInBytes()/10);
+        rgConfig.setReplicationDispatchRateInMsgs(rgConfig.getReplicationDispatchRateInMsgs()/10);
         rgs.resourceGroupUpdate(rgName, rgConfig);
 
         Assert.assertEquals(rgs.getNumResourceGroups(), 1);
@@ -184,6 +191,9 @@ public class ResourceGroupServiceTest extends MockedPulsarServiceBaseTest {
         monClassFields = retRG.monitoringClassFields[ResourceGroupMonitoringClass.Dispatch.ordinal()];
         Assert.assertEquals(monClassFields.configValuesPerPeriod.bytes, rgConfig.getDispatchRateInBytes().longValue());
         Assert.assertEquals(monClassFields.configValuesPerPeriod.messages, rgConfig.getDispatchRateInMsgs().intValue());
+        monClassFields = retRG.monitoringClassFields[ResourceGroupMonitoringClass.ReplicationDispatch.ordinal()];
+        Assert.assertEquals(monClassFields.configValuesPerPeriod.bytes, rgConfig.getReplicationDispatchRateInBytes().longValue());
+        Assert.assertEquals(monClassFields.configValuesPerPeriod.messages, rgConfig.getReplicationDispatchRateInMsgs().intValue());
 
         Assert.assertThrows(PulsarAdminException.class, () -> rgs.resourceGroupDelete(randomRgName));
 
@@ -197,6 +207,7 @@ public class ResourceGroupServiceTest extends MockedPulsarServiceBaseTest {
 
         final NamespaceName tenantAndNamespace = NamespaceName.get(tenantName, namespaceName);
         rgs.registerNameSpace(rgName, tenantAndNamespace);
+        rgs.registerTopic(rgName, topic);
 
         // Delete of our valid config should throw until we unref correspondingly.
         Assert.assertThrows(PulsarAdminException.class, () -> rgs.resourceGroupDelete(rgName));
@@ -213,6 +224,10 @@ public class ResourceGroupServiceTest extends MockedPulsarServiceBaseTest {
             // Gross hack!
             if (monClass == ResourceGroupMonitoringClass.Publish) {
                 nwUsage = usage.setPublish();
+            } else if (monClass == ResourceGroupMonitoringClass.Dispatch) {
+                nwUsage = usage.setDispatch();
+            } else if (monClass == ResourceGroupMonitoringClass.ReplicationDispatch) {
+                nwUsage = usage.setReplicationDispatch();
             } else {
                 nwUsage = usage.setDispatch();
             }
@@ -231,6 +246,7 @@ public class ResourceGroupServiceTest extends MockedPulsarServiceBaseTest {
 
         rgs.unRegisterTenant(rgName, tenantName);
         rgs.unRegisterNameSpace(rgName, tenantAndNamespace);
+        rgs.unRegisterTopic(topic);
 
         BytesAndMessagesCount publishQuota = rgs.getPublishRateLimiters(rgName);
 
