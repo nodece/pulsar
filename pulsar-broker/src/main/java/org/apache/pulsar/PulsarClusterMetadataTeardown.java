@@ -18,8 +18,6 @@
  */
 package org.apache.pulsar;
 
-import com.beust.jcommander.JCommander;
-import com.beust.jcommander.Parameter;
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -41,59 +39,68 @@ import org.apache.pulsar.metadata.api.MetadataStoreFactory;
 import org.apache.pulsar.metadata.api.extended.MetadataStoreExtended;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import picocli.CommandLine;
+import picocli.CommandLine.ArgGroup;
+import picocli.CommandLine.Command;
+import picocli.CommandLine.Option;
 
 /**
  * Teardown the metadata for a existed Pulsar cluster.
  */
+@Command(name = "delete-cluster-metadata")
 public class PulsarClusterMetadataTeardown {
 
     private static class Arguments {
-        @Parameter(names = { "-zk",
+        @Option(names = { "-zk",
                 "--zookeeper"}, description = "Local ZooKeeper quorum connection string", required = true)
         private String zookeeper;
 
-        @Parameter(names = {
+        @Option(names = {
                 "--zookeeper-session-timeout-ms"
         }, description = "Local zookeeper session timeout ms")
         private int zkSessionTimeoutMillis = 30000;
 
-        @Parameter(names = { "-c", "-cluster", "--cluster" }, description = "Cluster name")
+        @Option(names = { "-c", "-cluster", "--cluster" }, description = "Cluster name")
         private String cluster;
 
-        @Parameter(names = { "-cs", "--configuration-store" }, description = "Configuration Store connection string")
+        @Option(names = { "-cs", "--configuration-store" }, description = "Configuration Store connection string")
         private String configurationStore;
 
-        @Parameter(names = { "--bookkeeper-metadata-service-uri" }, description = "Metadata service uri of BookKeeper")
+        @Option(names = { "--bookkeeper-metadata-service-uri" }, description = "Metadata service uri of BookKeeper")
         private String bkMetadataServiceUri;
 
-        @Parameter(names = { "-h", "--help" }, description = "Show this help message")
+        @Option(names = { "-h", "--help" }, description = "Show this help message")
         private boolean help = false;
 
-        @Parameter(names = {"-g", "--generate-docs"}, description = "Generate docs")
+        @Option(names = {"-g", "--generate-docs"}, description = "Generate docs")
         private boolean generateDocs = false;
     }
 
     public static String[] localZkNodes = {
             "bookies", "counters", "loadbalance", "managed-ledgers", "namespace", "schemas", "stream" };
 
+    @ArgGroup(exclusive = false, multiplicity = "1")
+    private final Arguments arguments = new Arguments();
+
     public static void main(String[] args) throws Exception {
-        Arguments arguments = new Arguments();
-        JCommander jcommander = new JCommander();
+        PulsarClusterMetadataTeardown pulsarClusterMetadataTeardown = new PulsarClusterMetadataTeardown();
+        CommandLine commander = new CommandLine(pulsarClusterMetadataTeardown);
+        Arguments arguments;
         try {
-            jcommander.addObject(arguments);
-            jcommander.parse(args);
+            commander.parseArgs(args);
+            arguments = pulsarClusterMetadataTeardown.arguments;
             if (arguments.help) {
-                jcommander.usage();
+                commander.usage(commander.getOut());
                 return;
             }
             if (arguments.generateDocs) {
                 CmdGenerateDocs cmd = new CmdGenerateDocs("pulsar");
-                cmd.addCommand("delete-cluster-metadata", arguments);
+                cmd.addCommand("delete-cluster-metadata", commander);
                 cmd.run(null);
                 return;
             }
         } catch (Exception e) {
-            jcommander.usage();
+            commander.getErr().println(e);
             throw e;
         }
 
