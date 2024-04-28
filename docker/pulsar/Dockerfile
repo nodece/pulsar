@@ -57,15 +57,20 @@ FROM ubuntu:20.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG UBUNTU_MIRROR=mirror://mirrors.ubuntu.com/mirrors.txt
+ARG UBUNTU_PORTS_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/
 
 # Install some utilities
-RUN sed -i "s|http://archive\.ubuntu\.com/ubuntu/|${UBUNTU_MIRROR:-mirror://mirrors.ubuntu.com/mirrors.txt}|g" /etc/apt/sources.list \
-     && echo 'Acquire::http::Timeout "30";\nAcquire::ftp::Timeout "30";\nAcquire::Retries "3";' > /etc/apt/apt.conf.d/99timeout_and_retries \
+RUN sed -i -e "s|http://archive\.ubuntu\.com/ubuntu/|${UBUNTU_MIRROR:-http://archive.ubuntu.com/ubuntu/}|g" \
+         -e "s|http://ports\.ubuntu\.com/ubuntu-ports/|${UBUNTU_PORTS_MIRROR:-http://ports\.ubuntu\.com/ubuntu-ports/}|g" /etc/apt/sources.list \
+     && echo 'Acquire::http::Timeout "30";\nAcquire::http::ConnectionAttemptDelayMsec "2000";\nAcquire::https::Timeout "30";\nAcquire::https::ConnectionAttemptDelayMsec "2000";\nAcquire::ftp::Timeout "30";\nAcquire::ftp::ConnectionAttemptDelayMsec "2000";\nAcquire::Retries "15";' > /etc/apt/apt.conf.d/99timeout_and_retries \
      && apt-get update \
      && apt-get -y dist-upgrade \
      && apt-get -y install --no-install-recommends netcat dnsutils less procps iputils-ping \
                  python3 python3-kazoo python3-pip \
                  curl ca-certificates wget apt-transport-https
+
+#If not upgraded, it will affect the installation of grpcio.
+RUN python3 -m pip install --upgrade pip
 
 # Install Eclipse Temurin Package
 RUN mkdir -p /etc/apt/keyrings \
