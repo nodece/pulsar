@@ -56,8 +56,8 @@ RUN chmod g+w /pulsar/lib/presto
 FROM ubuntu:20.04
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG UBUNTU_MIRROR=mirror://mirrors.ubuntu.com/mirrors.txt
-ARG UBUNTU_PORTS_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/
+ARG UBUNTU_MIRROR=http://archive.ubuntu.com/ubuntu/
+ARG UBUNTU_PORTS_MIRROR=http://ports.ubuntu.com/ubuntu-ports/
 
 # Install some utilities
 RUN sed -i -e "s|http://archive\.ubuntu\.com/ubuntu/|${UBUNTU_MIRROR:-http://archive.ubuntu.com/ubuntu/}|g" \

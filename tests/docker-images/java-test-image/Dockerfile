@@ -33,7 +33,7 @@ RUN chmod a+rx /pulsar/bin/*
 WORKDIR /pulsar
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG UBUNTU_MIRROR=mirror://mirrors.ubuntu.com/mirrors.txt
+ARG UBUNTU_MIRROR=http://archive.ubuntu.com/ubuntu/
 
 RUN sed -i "s|http://archive\.ubuntu\.com/ubuntu/|${UBUNTU_MIRROR:-mirror://mirrors.ubuntu.com/mirrors.txt}|g" /etc/apt/sources.list \
      && apt-get update \
