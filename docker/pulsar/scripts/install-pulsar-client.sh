@@ -20,6 +20,6 @@
 
 set -x
 
-PYTHON_MAJOR_MINOR=$(python3 -V | sed -E 's/.* ([[:digit:]]+)\.([[:digit:]]+).*/\1\2/')
-WHEEL_FILE=$(ls /pulsar/pulsar-client | grep "cp${PYTHON_MAJOR_MINOR}")
-pip3 install /pulsar/pulsar-client/${WHEEL_FILE}[all]
+# Recommend using the "--only-binary :all:" option, but the ratelimit package doesn't have the whl file.
+# When there is no corresponding whl file, pip will automatically compile the package.
+pip3 install pulsar-client[all]==${PULSAR_CLIENT_PYTHON_VERSION} --prefer-binary

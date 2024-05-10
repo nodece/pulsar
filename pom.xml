@@ -80,6 +80,8 @@ flexible messaging model and an intuitive client API.</description>
     <maven.compiler.source>8</maven.compiler.source>
     <maven.compiler.target>8</maven.compiler.target>
 
+    <pulsar.client.python.version>3.5.0</pulsar.client.python.version>
+
     <!--config keys to configure test selection -->
     <include>**/Test*.java,**/*Test.java,**/*Tests.java,**/*TestCase.java</include>
     <exclude/>
@@ -89,6 +91,12 @@ flexible messaging model and an intuitive client API.</description>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
     <redirectTestOutputToFile>true</redirectTestOutputToFile>
+
+    <!-- By default build for local Docker platform.
+         To create multi-arch image, pass -Ddocker.platforms=linux/arm64,linux/amd64
+    -->
+    <docker.platforms></docker.platforms>
+
     <test.additional.args></test.additional.args>
     <testReuseFork>true</testReuseFork>
     <testForkCount>4</testForkCount>
@@ -127,7 +135,8 @@ flexible messaging model and an intuitive client API.</description>
     <reflections.version>0.9.11</reflections.version>
     <swagger.version>1.6.10</swagger.version>
     <puppycrawl.checkstyle.version>8.37</puppycrawl.checkstyle.version>
-    <dockerfile-maven.version>1.4.13</dockerfile-maven.version>
+    <docker-maven.version>0.43.3</docker-maven.version>
+    <docker.verbose>true</docker.verbose>
     <typetools.version>0.5.0</typetools.version>
     <byte-buddy.version>1.14.12</byte-buddy.version>
     <zt-zip.version>1.17</zt-zip.version>
@@ -256,7 +265,7 @@ flexible messaging model and an intuitive client API.</description>
     <properties-maven-plugin.version>1.0.0</properties-maven-plugin.version>
     <nifi-nar-maven-plugin.version>1.5.0</nifi-nar-maven-plugin.version>
     <maven-checkstyle-plugin.version>3.1.2</maven-checkstyle-plugin.version>
-    <git-commit-id-plugin.version>4.0.2</git-commit-id-plugin.version>
+    <git-commit-id-plugin.version>4.9.10</git-commit-id-plugin.version>
     <wagon-ssh-external.version>3.4.3</wagon-ssh-external.version>
     <os-maven-plugin.version>1.4.1.Final</os-maven-plugin.version>
     <jacoco-maven-plugin.version>0.8.7</jacoco-maven-plugin.version>
@@ -1504,6 +1513,31 @@ flexible messaging model and an intuitive client API.</description>
       </plugin>
 
       <plugin>
+        <groupId>pl.project13.maven</groupId>
+        <artifactId>git-commit-id-plugin</artifactId>
+        <version>${git-commit-id-plugin.version}</version>
+        <executions>
+          <execution>
+            <id>git-info</id>
+            <goals>
+              <goal>revision</goal>
+            </goals>
+          </execution>
+        </executions>
+        <configuration>
+          <skip>true</skip>
+          <useNativeGit>true</useNativeGit>
+          <prefix>git</prefix>
+          <failOnNoGitDirectory>false</failOnNoGitDirectory>
+          <failOnUnableToExtractRepoInfo>false</failOnUnableToExtractRepoInfo>
+          <skipPoms>false</skipPoms>
+          <gitDescribe>
+            <skip>true</skip>
+          </gitDescribe>
+        </configuration>
+      </plugin>
+
+      <plugin>
         <groupId>com.mycila</groupId>
         <artifactId>license-maven-plugin</artifactId>
         <version>${license-maven-plugin.version}</version>
@@ -1909,6 +1943,11 @@ flexible messaging model and an intuitive client API.</description>
           <groupId>org.codehaus.mojo</groupId>
           <artifactId>properties-maven-plugin</artifactId>
           <version>${properties-maven-plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>io.fabric8</groupId>
+          <artifactId>docker-maven-plugin</artifactId>
+          <version>${docker-maven.version}</version>
         </plugin>
       </plugins>
     </pluginManagement>

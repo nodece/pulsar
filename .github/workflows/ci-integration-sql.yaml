@@ -88,11 +88,11 @@ jobs:
 
       - name: build pulsar image
         if: ${{ steps.check_changes.outputs.docs_only != 'true' }}
-        run: mvn -B -f docker/pulsar/pom.xml install -am -Pdocker,-main -DskipTests -Ddocker.nocache=true
+        run: mvn -B -f docker/pulsar/pom.xml install -am -Pdocker,-main -DskipTests -DUBUNTU_MIRROR=http://azure.archive.ubuntu.com/ubuntu/
 
       - name: build pulsar-all image
         if: ${{ steps.check_changes.outputs.docs_only != 'true' }}
-        run: mvn -B -f docker/pulsar-all/pom.xml install -am -Pdocker,-main -DskipTests -Ddocker.nocache=true
+        run: mvn -B -f docker/pulsar-all/pom.xml install -am -Pdocker,-main -DskipTests -DUBUNTU_MIRROR=http://azure.archive.ubuntu.com/ubuntu/
 
       - name: build artifacts and docker pulsar latest test image
         if: ${{ steps.check_changes.outputs.docs_only != 'true' }}
