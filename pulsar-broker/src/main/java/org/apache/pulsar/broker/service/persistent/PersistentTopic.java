@@ -72,6 +72,7 @@ import org.apache.bookkeeper.mledger.ManagedCursor;
 import org.apache.bookkeeper.mledger.ManagedCursor.IndividualDeletedEntries;
 import org.apache.bookkeeper.mledger.ManagedLedger;
 import org.apache.bookkeeper.mledger.ManagedLedgerException;
+import org.apache.bookkeeper.mledger.ManagedLedgerException.CursorNotFoundException;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.ManagedLedgerAlreadyClosedException;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.ManagedLedgerFencedException;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.ManagedLedgerTerminatedException;
@@ -2014,8 +2015,7 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
         log.info("[{}] Starting replicator to remote: {}", topic, remoteCluster);
         final CompletableFuture<Void> future = new CompletableFuture<>();
 
-        String name = PersistentReplicator.getReplicatorName(replicatorPrefix, remoteCluster);
-        ledger.asyncOpenCursor(name, new OpenCursorCallback() {
+        ledger.asyncOpenCursor(getReplicatorCursorName(remoteCluster), new OpenCursorCallback() {
             @Override
             public void openCursorComplete(ManagedCursor cursor, Object ctx) {
                 String localCluster = brokerService.pulsar().getConfiguration().getClusterName();
@@ -2092,11 +2092,17 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
                 });
     }
 
-    CompletableFuture<Void> removeReplicator(String remoteCluster) {
+    @VisibleForTesting
+    public String getReplicatorCursorName(String remoteCluster) {
+        return PersistentReplicator.getReplicatorName(replicatorPrefix, remoteCluster);
+    }
+
+    @VisibleForTesting
+    public CompletableFuture<Void> removeReplicator(String remoteCluster) {
         log.info("[{}] Removing replicator to {}", topic, remoteCluster);
         final CompletableFuture<Void> future = new CompletableFuture<>();
 
-        String name = PersistentReplicator.getReplicatorName(replicatorPrefix, remoteCluster);
+        String name = getReplicatorCursorName(remoteCluster);
 
         Optional.ofNullable(replicators.get(remoteCluster)).map(Replicator::terminate)
                 .orElse(CompletableFuture.completedFuture(null)).thenRun(() -> {
@@ -2109,6 +2115,10 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
 
                 @Override
                 public void deleteCursorFailed(ManagedLedgerException exception, Object ctx) {
+                    if (exception instanceof CursorNotFoundException) {
+                        deleteCursorComplete(ctx);
+                        return;
+                    }
                     log.error("[{}] Failed to delete cursor {} {}", topic, name, exception.getMessage(), exception);
                     future.completeExceptionally(new PersistenceException(exception));
                 }

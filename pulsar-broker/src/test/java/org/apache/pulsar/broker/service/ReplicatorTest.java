@@ -20,6 +20,7 @@ package org.apache.pulsar.broker.service;
 
 import static org.apache.pulsar.broker.BrokerTestUtil.newUniqueName;
 import static org.apache.pulsar.broker.auth.MockedPulsarServiceBaseTest.retryStrategically;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.spy;
@@ -1818,6 +1819,34 @@ public class ReplicatorTest extends ReplicatorTestBase {
         }
 
         assertEquals(result, Lists.newArrayList("V1", "V2", "V3", "V4"));
+    }
+
+    @Test
+    public void testRemoveNotExistCursor() throws Exception {
+        final String cluster1 = pulsar1.getConfig().getClusterName();
+        final String cluster2 = pulsar2.getConfig().getClusterName();
+        final String namespace = BrokerTestUtil.newUniqueName("pulsar/ns");
+        final TopicName topic = TopicName
+                .get(BrokerTestUtil.newUniqueName("persistent://" + namespace + "/testRemoveReplicator"));
+        admin1.namespaces().createNamespace(namespace, Sets.newHashSet(cluster1, cluster2));
+        admin1.namespaces().setNamespaceReplicationClusters(namespace, Sets.newHashSet(cluster1, cluster2));
+
+        @Cleanup
+        PulsarClient client1 = PulsarClient.builder().serviceUrl(url1.toString()).statsInterval(0, TimeUnit.SECONDS)
+                .build();
+
+        @Cleanup
+        Producer<byte[]> persistentProducer1 = client1.newProducer().topic(topic.toString()).create();
+        persistentProducer1.send("V1".getBytes());
+
+        PersistentTopic persistentTopic =
+                (PersistentTopic) pulsar1.getBrokerService().getTopicReference(topic.toString()).get();
+        Awaitility.await().untilAsserted(() -> assertEquals(persistentTopic.getReplicators().keys().size(), 1));
+
+        persistentTopic.getManagedLedger().deleteCursor(persistentTopic.getReplicatorCursorName(cluster2));
+        CompletableFuture<Void> removeFuture = persistentTopic.removeReplicator(cluster2);
+        assertThat(removeFuture).succeedsWithin(3, TimeUnit.SECONDS);
+        assertTrue(persistentTopic.getReplicators().isEmpty());
     }
 
     private void pauseReplicator(PersistentReplicator replicator) {
