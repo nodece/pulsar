@@ -1230,8 +1230,9 @@ public class BrokerService implements Closeable {
             if (log.isDebugEnabled()) {
                 log.debug("Broker is unable to load non-persistent topic {}", topic);
             }
-            return FutureUtil.failedFuture(
+            topicFuture.completeExceptionally(
                     new NotAllowedException("Broker is not unable to load non-persistent topic"));
+            return topicFuture;
         }
         final long topicCreateTimeMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime());
         NonPersistentTopic nonPersistentTopic = new NonPersistentTopic(topic, this);
