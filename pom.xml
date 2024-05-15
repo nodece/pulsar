@@ -105,6 +105,8 @@ flexible messaging model and an intuitive client API.</description>
     <testRetryCount>1</testRetryCount>
     <testJacocoAgentArgument></testJacocoAgentArgument>
     <docker.organization>apachepulsar</docker.organization>
+    <docker.image>pulsar</docker.image>
+    <docker.tag>latest</docker.tag>
     <skipSourceReleaseAssembly>false</skipSourceReleaseAssembly>
     <skipBuildDistribution>false</skipBuildDistribution>
     <shadePluginPhase>package</shadePluginPhase>
