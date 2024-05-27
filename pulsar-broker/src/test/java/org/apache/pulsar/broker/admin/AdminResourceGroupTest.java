@@ -21,6 +21,7 @@ package org.apache.pulsar.broker.admin;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertNull;
+import static org.testng.Assert.assertThrows;
 import static org.testng.Assert.assertTrue;
 import java.util.UUID;
 import org.apache.commons.lang3.StringUtils;
@@ -137,5 +138,31 @@ public class AdminResourceGroupTest extends BrokerTestBase {
                     .getTopicResourceGroup(topicName);
             assertNull(rg);
         });
+    }
+
+    @Test
+    public void testUpdateResourceGroup() throws PulsarAdminException {
+        String resourceGroupName = "rg-" + UUID.randomUUID();
+        ResourceGroup resourceGroup = new ResourceGroup();
+        resourceGroup.setPublishRateInMsgs(1000);
+        resourceGroup.setPublishRateInBytes(100000L);
+        resourceGroup.setDispatchRateInMsgs(2000);
+        resourceGroup.setDispatchRateInBytes(200000L);
+        resourceGroup.setReplicationDispatchRateInMsgs(10L);
+        resourceGroup.setReplicationDispatchRateInBytes(20L);
+
+        admin.resourcegroups().createResourceGroup(resourceGroupName, resourceGroup);
+        ResourceGroup got = admin.resourcegroups().getResourceGroup(resourceGroupName);
+        assertEquals(got, resourceGroup);
+
+        resourceGroup.setReplicationDispatchRateInMsgs(11L);
+        resourceGroup.setReplicationDispatchRateInBytes(29L);
+        admin.resourcegroups().updateResourceGroup(resourceGroupName, resourceGroup);
+        got = admin.resourcegroups().getResourceGroup(resourceGroupName);
+        assertEquals(got, resourceGroup);
+
+        admin.resourcegroups().deleteResourceGroup(resourceGroupName);
+        assertThrows(PulsarAdminException.NotFoundException.class,
+                () -> admin.resourcegroups().getResourceGroup(resourceGroupName));
     }
 }
