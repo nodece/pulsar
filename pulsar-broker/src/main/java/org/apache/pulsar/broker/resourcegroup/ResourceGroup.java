@@ -22,6 +22,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.google.common.annotations.VisibleForTesting;
 import io.prometheus.client.Counter;
+import io.prometheus.client.Gauge;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -449,12 +450,12 @@ public class ResourceGroup {
 
     // Visibility for unit testing
     protected static double getRgRemoteUsageByteCount (String rgName, String monClassName, String brokerName) {
-        return rgRemoteUsageReportsBytes.labels(rgName, monClassName, brokerName).get();
+        return rgRemoteUsageReportsBytesTotal.labels(rgName, monClassName, brokerName).get();
     }
 
     // Visibility for unit testing
     protected static double getRgRemoteUsageMessageCount (String rgName, String monClassName, String brokerName) {
-        return rgRemoteUsageReportsMessages.labels(rgName, monClassName, brokerName).get();
+        return rgRemoteUsageReportsMessagesTotal.labels(rgName, monClassName, brokerName).get();
     }
 
     // Visibility for unit testing
@@ -572,9 +573,10 @@ public class ResourceGroup {
         } finally {
             monEntity.usageFromOtherBrokersLock.unlock();
         }
-        rgRemoteUsageReportsBytes.labels(this.ruConsumer.getID(), monClass.name(), broker).inc(newByteCount);
-        rgRemoteUsageReportsMessages.labels(this.ruConsumer.getID(), monClass.name(), broker).inc(newMessageCount);
-
+        rgRemoteUsageReportsBytesTotal.labels(this.ruConsumer.getID(), monClass.name(), broker).inc(newByteCount);
+        rgRemoteUsageReportsMessagesTotal.labels(this.ruConsumer.getID(), monClass.name(), broker).inc(newMessageCount);
+        rgRemoteUsageReportsBytes.labels(this.ruConsumer.getID(), monClass.name(), broker).set(newByteCount);
+        rgRemoteUsageReportsMessages.labels(this.ruConsumer.getID(), monClass.name(), broker).set(newMessageCount);
         oldByteCount = oldMessageCount = -1;
         if (oldUsageStats != null) {
             oldByteCount = oldUsageStats.usedValues.bytes;
@@ -687,12 +689,22 @@ public class ResourceGroup {
     private static final String[] resourceGroupMontoringclassRemotebrokerLabels =
                                                     {"ResourceGroup", "MonitoringClass", "RemoteBroker"};
 
-    private static final Counter rgRemoteUsageReportsBytes = Counter.build()
+    private static final Counter rgRemoteUsageReportsBytesTotal = Counter.build()
+            .name("pulsar_resource_group_remote_usage_bytes_used_total")
+            .help("Bytes used reported about this <RG, monitoring class> from a remote broker")
+            .labelNames(resourceGroupMontoringclassRemotebrokerLabels)
+            .register();
+    private static final Gauge rgRemoteUsageReportsBytes = Gauge.build()
             .name("pulsar_resource_group_remote_usage_bytes_used")
             .help("Bytes used reported about this <RG, monitoring class> from a remote broker")
             .labelNames(resourceGroupMontoringclassRemotebrokerLabels)
             .register();
-    private static final Counter rgRemoteUsageReportsMessages = Counter.build()
+    private static final Counter rgRemoteUsageReportsMessagesTotal = Counter.build()
+            .name("pulsar_resource_group_remote_usage_messages_used_total")
+            .help("Messages used reported about this <RG, monitoring class> from a remote broker")
+            .labelNames(resourceGroupMontoringclassRemotebrokerLabels)
+            .register();
+    private static final Gauge rgRemoteUsageReportsMessages = Gauge.build()
             .name("pulsar_resource_group_remote_usage_messages_used")
             .help("Messages used reported about this <RG, monitoring class> from a remote broker")
             .labelNames(resourceGroupMontoringclassRemotebrokerLabels)
