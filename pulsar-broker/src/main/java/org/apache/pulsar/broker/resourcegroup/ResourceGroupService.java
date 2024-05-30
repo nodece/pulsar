@@ -23,6 +23,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.google.common.annotations.VisibleForTesting;
 import io.prometheus.client.Counter;
+import io.prometheus.client.Gauge;
 import io.prometheus.client.Summary;
 import java.util.Map;
 import java.util.Set;
@@ -573,11 +574,21 @@ public class ResourceGroupService implements AutoCloseable{
 
     // Visibility for testing.
     protected static double getRgQuotaByteCount (String rgName, String monClassName) {
+        return rgCalculatedQuotaBytesTotal.labels(rgName, monClassName).get();
+    }
+
+    // Visibility for testing.
+    protected static double getRgQuotaByte (String rgName, String monClassName) {
         return rgCalculatedQuotaBytes.labels(rgName, monClassName).get();
     }
 
     // Visibility for testing.
     protected static double getRgQuotaMessageCount (String rgName, String monClassName) {
+        return rgCalculatedQuotaMessagesTotal.labels(rgName, monClassName).get();
+    }
+
+    // Visibility for testing.
+    protected static double getRgQuotaMessage(String rgName, String monClassName) {
         return rgCalculatedQuotaMessages.labels(rgName, monClassName).get();
     }
 
@@ -725,13 +736,7 @@ public class ResourceGroupService implements AutoCloseable{
                             globUsageMessagesArray);
 
                     BytesAndMessagesCount oldBMCount = resourceGroup.updateLocalQuota(monClass, updatedQuota);
-                    // Guard against unconfigured quota settings, for which computeLocalQuota will return negative.
-                    if (updatedQuota.messages >= 0) {
-                        rgCalculatedQuotaMessages.labels(rgName, monClass.name()).inc(updatedQuota.messages);
-                    }
-                    if (updatedQuota.bytes >= 0) {
-                        rgCalculatedQuotaBytes.labels(rgName, monClass.name()).inc(updatedQuota.bytes);
-                    }
+                    incRgCalculatedQuota(rgName, monClass, updatedQuota, resourceUsagePublishPeriodInSeconds);
                     if (oldBMCount != null) {
                         long messagesIncrement = updatedQuota.messages - oldBMCount.messages;
                         long bytesIncrement = updatedQuota.bytes - oldBMCount.bytes;
@@ -822,6 +827,21 @@ public class ResourceGroupService implements AutoCloseable{
         }
     }
 
+    static void incRgCalculatedQuota(String rgName, ResourceGroupMonitoringClass monClass,
+                                     BytesAndMessagesCount updatedQuota, long resourceUsagePublishPeriodInSeconds) {
+        // Guard against unconfigured quota settings, for which computeLocalQuota will return negative.
+        if (updatedQuota.messages >= 0) {
+            rgCalculatedQuotaMessagesTotal.labels(rgName, monClass.name())
+                    .inc(updatedQuota.messages * resourceUsagePublishPeriodInSeconds);
+            rgCalculatedQuotaMessages.labels(rgName, monClass.name()).set(updatedQuota.messages);
+        }
+        if (updatedQuota.bytes >= 0) {
+            rgCalculatedQuotaBytesTotal.labels(rgName, monClass.name())
+                    .inc(updatedQuota.bytes * resourceUsagePublishPeriodInSeconds);
+            rgCalculatedQuotaBytes.labels(rgName, monClass.name()).set(updatedQuota.bytes);
+        }
+    }
+
     @VisibleForTesting
     protected Cache<String, BytesAndMessagesCount> newStatsCache(long durationMS) {
         return Caffeine.newBuilder()
@@ -870,12 +890,22 @@ public class ResourceGroupService implements AutoCloseable{
     private static final String[] resourceGroupLabel = {"ResourceGroup"};
     private static final String[] resourceGroupMonitoringclassLabels = {"ResourceGroup", "MonitoringClass"};
 
-    private static final Counter rgCalculatedQuotaBytes = Counter.build()
+    private static final Counter rgCalculatedQuotaBytesTotal = Counter.build()
+            .name("pulsar_resource_group_calculated_bytes_quota_total")
+            .help("Bytes quota calculated for resource group")
+            .labelNames(resourceGroupMonitoringclassLabels)
+            .register();
+    private static final Gauge rgCalculatedQuotaBytes = Gauge.build()
             .name("pulsar_resource_group_calculated_bytes_quota")
             .help("Bytes quota calculated for resource group")
             .labelNames(resourceGroupMonitoringclassLabels)
             .register();
-    private static final Counter rgCalculatedQuotaMessages = Counter.build()
+    private static final Counter rgCalculatedQuotaMessagesTotal = Counter.build()
+            .name("pulsar_resource_group_calculated_messages_quota_total")
+            .help("Messages quota calculated for resource group")
+            .labelNames(resourceGroupMonitoringclassLabels)
+            .register();
+    private static final Gauge rgCalculatedQuotaMessages = Gauge.build()
             .name("pulsar_resource_group_calculated_messages_quota")
             .help("Messages quota calculated for resource group")
             .labelNames(resourceGroupMonitoringclassLabels)
