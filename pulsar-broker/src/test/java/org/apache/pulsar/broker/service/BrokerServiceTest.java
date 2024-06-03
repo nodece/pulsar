@@ -21,6 +21,7 @@ package org.apache.pulsar.broker.service;
 import static org.apache.pulsar.common.naming.TopicName.TRANSACTION_COORDINATOR_ASSIGN;
 import static org.apache.pulsar.common.naming.TopicName.TRANSACTION_COORDINATOR_LOG;
 import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.spy;
 import static org.testng.Assert.assertEquals;
@@ -66,6 +67,7 @@ import lombok.Cleanup;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
 import org.apache.bookkeeper.mledger.ManagedLedgerException;
+import org.apache.bookkeeper.mledger.impl.ManagedCursorImpl;
 import org.apache.bookkeeper.mledger.impl.ManagedLedgerFactoryImpl;
 import org.apache.bookkeeper.mledger.impl.ManagedLedgerImpl;
 import org.apache.commons.lang3.StringUtils;
@@ -76,6 +78,7 @@ import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.namespace.NamespaceService;
 import org.apache.pulsar.broker.service.BrokerServiceException.PersistenceException;
+import org.apache.pulsar.broker.service.persistent.PersistentSubscription;
 import org.apache.pulsar.broker.service.persistent.PersistentTopic;
 import org.apache.pulsar.broker.stats.prometheus.PrometheusRawMetricsProvider;
 import org.apache.pulsar.client.admin.BrokerStats;
@@ -89,6 +92,7 @@ import org.apache.pulsar.client.api.ProducerBuilder;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.client.api.Schema;
+import org.apache.pulsar.client.api.SubscriptionInitialPosition;
 import org.apache.pulsar.client.api.SubscriptionType;
 import org.apache.pulsar.client.impl.ConnectionPool;
 import org.apache.pulsar.client.impl.PulsarServiceNameResolver;
@@ -103,11 +107,12 @@ import org.apache.pulsar.common.policies.data.SubscriptionStats;
 import org.apache.pulsar.common.policies.data.TopicStats;
 import org.apache.pulsar.common.protocol.Commands;
 import org.apache.pulsar.common.util.netty.EventLoopUtil;
-import org.awaitility.Awaitility;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.MockZooKeeper;
+import org.awaitility.Awaitility;
 import org.glassfish.jersey.client.JerseyClient;
 import org.glassfish.jersey.client.JerseyClientBuilder;
+import org.mockito.Mockito;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
@@ -1175,6 +1180,66 @@ public class BrokerServiceTest extends BrokerTestBase {
                 }
             }
         }
+    }
+
+    @Test
+    public void testCheckInactiveSubscriptionWhenNoMessageToAck() throws Exception {
+        String namespace = "prop/testInactiveSubscriptionWhenNoMessageToAck";
+
+        try {
+            admin.namespaces().createNamespace(namespace);
+        } catch (PulsarAdminException.ConflictException e) {
+            // Ok.. (if test fails intermittently and namespace is already created)
+        }
+
+        String topic = "persistent://" + namespace + "/my-topic";
+        Producer<byte[]> producer = pulsarClient.newProducer().topic(topic).create();
+        producer.send("test".getBytes());
+        producer.close();
+
+        // create consumer to consume all messages
+        Consumer<byte[]> consumer = pulsarClient.newConsumer().topic(topic).subscriptionName("sub1")
+                .subscriptionInitialPosition(SubscriptionInitialPosition.Earliest).subscribe();
+        consumer.acknowledge(consumer.receive());
+
+        Optional<Topic> topicOptional = pulsar.getBrokerService().getTopic(topic, true).get();
+        assertTrue(topicOptional.isPresent());
+        PersistentTopic persistentTopic = (PersistentTopic) topicOptional.get();
+
+        // wait for 1s, but consumer is still connected all the time.
+        // so subscription should not be deleted.
+        Thread.sleep(1000);
+        persistentTopic.checkInactiveSubscriptions(1000);
+        PersistentTopic finalPersistentTopic = persistentTopic;
+        Awaitility.await().pollDelay(3, TimeUnit.SECONDS).until(() ->
+                finalPersistentTopic.getSubscriptions().containsKey("sub1"));
+        PersistentSubscription sub = persistentTopic.getSubscription("sub1");
+
+        // shutdown pulsar ungracefully
+        // disable the updateLastActive method to simulate the ungraceful shutdown
+        ManagedCursorImpl cursor = (ManagedCursorImpl) sub.getCursor();
+        ManagedCursorImpl spyCursor = Mockito.spy(cursor);
+        doNothing().when(spyCursor).updateLastActive();
+        Field cursorField = PersistentSubscription.class.getDeclaredField("cursor");
+        cursorField.setAccessible(true);
+        cursorField.set(sub, spyCursor);
+
+        // restart pulsar
+        consumer.close();
+        restartBroker();
+
+        admin.lookups().lookupTopic(topic);
+        topicOptional = pulsar.getBrokerService().getTopic(topic, true).get();
+        assertTrue(topicOptional.isPresent());
+        persistentTopic = (PersistentTopic) topicOptional.get();
+        persistentTopic.checkInactiveSubscriptions(1000);
+
+        // check if subscription is still present
+        PersistentTopic finalPersistentTopic1 = persistentTopic;
+        Awaitility.await().pollDelay(3, TimeUnit.SECONDS).until(() ->
+                finalPersistentTopic1.getSubscriptions().containsKey("sub1"));
+        sub = persistentTopic.getSubscription("sub1");
+        assertNotNull(sub);
     }
 
     /**

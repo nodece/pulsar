@@ -410,7 +410,6 @@ public class ManagedCursorImpl implements ManagedCursor {
             public void operationComplete(ManagedCursorInfo info, Stat stat) {
 
                 cursorLedgerStat = stat;
-                lastActive = info.getLastActive() != 0 ? info.getLastActive() : lastActive;
                 if (log.isDebugEnabled()) {
                     log.debug("[{}] [{}] Recover cursor last active to [{}]", ledger.getName(), name, lastActive);
                 }
