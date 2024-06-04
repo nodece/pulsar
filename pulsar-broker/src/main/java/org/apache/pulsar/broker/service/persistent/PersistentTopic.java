@@ -142,6 +142,7 @@ import org.apache.pulsar.client.admin.OffloadProcessStatus;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.PulsarAdminException.ConflictException;
 import org.apache.pulsar.client.api.MessageId;
+import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.transaction.TxnID;
 import org.apache.pulsar.client.impl.BatchMessageIdImpl;
 import org.apache.pulsar.client.impl.MessageIdImpl;
@@ -2061,9 +2062,50 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
                         return removeReplicator(remoteCluster).thenApply(__ -> null);
                     }
                     return brokerService.pulsar().getPulsarResources().getClusterResources()
-                            .getClusterAsync(remoteCluster)
-                            .thenApply(clusterData ->
-                                    brokerService.getReplicationClient(remoteCluster, clusterData));
+                            .getClusterAsync(remoteCluster).thenCompose(clusterData -> {
+                                if (clusterData.isEmpty()) {
+                                    log.warn("No cluster data for cluster {}", remoteCluster);
+                                    return CompletableFuture.completedFuture(null);
+                                }
+
+                                TopicName partitionedTopic =
+                                        TopicName.get(TopicName.get(topic).getPartitionedTopicName());
+                                PulsarClient replicationClient =
+                                        brokerService.getReplicationClient(remoteCluster, clusterData);
+
+                                // The system topic is implicitly created, the metadata cannot be obtained during
+                                // the first loading.
+                                if (SystemTopicNames.isEventSystemTopic(partitionedTopic)) {
+                                    return CompletableFuture.completedFuture(replicationClient);
+                                }
+
+                                PulsarAdmin replicationAdmin =
+                                        brokerService.getClusterPulsarAdmin(remoteCluster, clusterData);
+                                return replicationAdmin.topics()
+                                        .getPartitionedTopicMetadataAsync(partitionedTopic.toString())
+                                        .exceptionally(e -> {
+                                            log.error("Failed to get {} metadata from remote cluster {}", topic,
+                                                    remoteCluster, e);
+                                            return null;
+                                        }).thenCombine(brokerService.pulsar().getBrokerService()
+                                                        .fetchPartitionedTopicMetadataAsync(partitionedTopic),
+                                                (remoteMetadata, localMetadata) -> {
+                                                    // The remote cluster does not have metadata.
+                                                    if (remoteMetadata == null) {
+                                                        return null;
+                                                    }
+
+                                                    if (localMetadata.partitions != remoteMetadata.partitions) {
+                                                        log.error("[{}] The local topic and remote topic metadata are "
+                                                                        + "different. local partitions: {}, remote "
+                                                                        + "partitions: {}", topic,
+                                                                localMetadata.partitions,
+                                                                remoteMetadata.partitions);
+                                                        return null;
+                                                    }
+                                                    return replicationClient;
+                                                });
+                            });
                 })
                 .thenAccept(replicationClient -> {
                     if (replicationClient == null) {
