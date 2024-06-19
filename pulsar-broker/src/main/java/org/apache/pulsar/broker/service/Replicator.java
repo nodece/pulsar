@@ -30,6 +30,8 @@ public interface Replicator {
 
     ReplicatorStatsImpl getStats();
 
+    CompletableFuture<Void> terminate();
+
     CompletableFuture<Void> disconnect();
 
     CompletableFuture<Void> disconnect(boolean b);

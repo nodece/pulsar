@@ -333,23 +333,13 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
 
                     schemaValidationEnforced = policies.schema_validation_enforced;
                 }, brokerService.getTopicOrderedExecutor())
-                .thenCompose(ignore -> initTopicPolicyAndApply())
+                .thenCompose(ignore -> initTopicPolicy())
+                .thenCompose(ignore -> removeOrphanReplicationCursors())
                 .exceptionally(ex -> {
                     log.warn("[{}] Error getting policies {} and isEncryptionRequired will be set to false",
                             topic, ex.getMessage());
                     isEncryptionRequired = false;
                     return null;
-                })
-                .thenCompose(ignore -> {
-                    List<CompletableFuture<Void>> futures = new ArrayList<>();
-                    for (ManagedCursor cursor : ledger.getCursors()) {
-                        if (cursor.getName().startsWith(replicatorPrefix)) {
-                            String localCluster = brokerService.pulsar().getConfiguration().getClusterName();
-                            String remoteCluster = PersistentReplicator.getRemoteCluster(cursor.getName());
-                            futures.add(addReplicationCluster(remoteCluster, cursor, localCluster));
-                        }
-                    }
-                    return FutureUtil.waitForAll(futures);
                 });
     }
 
@@ -388,6 +378,21 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
                 this.dispatchRateLimiter = Optional.of(new DispatchRateLimiter(this, Type.TOPIC));
             }
         }
+    }
+
+    private CompletableFuture<Void> removeOrphanReplicationCursors() {
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
+        List<String> replicationClusters = topicPolicies.getReplicationClusters().get();
+        for (ManagedCursor cursor : ledger.getCursors()) {
+            if (cursor.getName().startsWith(replicatorPrefix)) {
+                String remoteCluster = PersistentReplicator.getRemoteCluster(cursor.getName());
+                if (!replicationClusters.contains(remoteCluster)) {
+                    log.warn("Remove the orphan replicator because the cluster '{}' does not exist", remoteCluster);
+                    futures.add(removeReplicator(remoteCluster));
+                }
+            }
+        }
+        return FutureUtil.waitForAll(futures);
     }
 
     private PersistentSubscription createPersistentSubscription(String subscriptionName, ManagedCursor cursor,
@@ -1555,30 +1560,18 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
         return future;
     }
 
-    private CompletableFuture<Boolean> checkReplicationCluster(String remoteCluster) {
-        return brokerService.getPulsar().getPulsarResources().getNamespaceResources()
-                .getPoliciesAsync(TopicName.get(topic).getNamespaceObject())
-                .thenApply(optPolicies -> optPolicies.map(policies -> policies.replication_clusters)
-                        .orElse(Collections.emptySet()).contains(remoteCluster)
-                        || topicPolicies.getReplicationClusters().get().contains(remoteCluster));
-    }
-
     protected CompletableFuture<Void> addReplicationCluster(String remoteCluster, ManagedCursor cursor,
             String localCluster) {
         return AbstractReplicator.validatePartitionedTopicAsync(PersistentTopic.this.getName(), brokerService)
-                .thenCompose(__ -> checkReplicationCluster(remoteCluster))
-                .thenCompose(clusterExists -> {
-                    if (!clusterExists) {
-                        log.warn("Remove the replicator because the cluster '{}' does not exist", remoteCluster);
-                        return removeReplicator(remoteCluster).thenApply(__ -> null);
-                    }
-                    return brokerService.pulsar().getPulsarResources().getClusterResources()
-                            .getClusterAsync(remoteCluster)
-                            .thenApply(clusterData ->
-                                    brokerService.getReplicationClient(remoteCluster, clusterData));
-                })
+                .thenCompose(__ -> brokerService.pulsar().getPulsarResources().getClusterResources()
+                        .getClusterAsync(remoteCluster)
+                        .thenApply(clusterData ->
+                                brokerService.getReplicationClient(remoteCluster, clusterData)))
                 .thenAccept(replicationClient -> {
                     if (replicationClient == null) {
+                        log.error("[{}] Can not create replicator because the remote client can not be created."
+                                        + " remote cluster: {}.",
+                                topic, remoteCluster);
                         return;
                     }
                     Replicator replicator = replicators.computeIfAbsent(remoteCluster, r -> {
@@ -3170,20 +3163,17 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
         }
     }
 
-    protected CompletableFuture<Void> initTopicPolicyAndApply() {
+    protected CompletableFuture<Void> initTopicPolicy() {
         if (brokerService.pulsar().getConfig().isSystemTopicEnabled()
                 && brokerService.pulsar().getConfig().isTopicLevelPoliciesEnabled()) {
             brokerService.getPulsar().getTopicPoliciesService()
                     .registerListener(TopicName.getPartitionedTopicName(topic), this);
-            TopicPolicies topicPolicies = brokerService.getPulsar().getTopicPoliciesService()
-                    .getTopicPoliciesIfExists(TopicName.getPartitionedTopicName(topic));
-            if (topicPolicies != null) {
-                onUpdate(topicPolicies);
-                return CompletableFuture.completedFuture(null);
-            }
+            return CompletableFuture.completedFuture(null).thenRunAsync(() -> onUpdate(
+                            brokerService.getPulsar().getTopicPoliciesService()
+                                    .getTopicPoliciesIfExists(TopicName.getPartitionedTopicName(topic))),
+                    brokerService.getTopicOrderedExecutor());
         }
-
-        return FutureUtil.waitForAll(applyUpdatedTopicPolicies());
+        return CompletableFuture.completedFuture(null);
     }
 
     @VisibleForTesting

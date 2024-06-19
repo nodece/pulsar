@@ -37,7 +37,7 @@ import org.apache.pulsar.common.util.FutureUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public abstract class AbstractReplicator {
+public abstract class AbstractReplicator implements Replicator {
 
     protected final BrokerService brokerService;
     protected final String topicName;
@@ -64,7 +64,7 @@ public abstract class AbstractReplicator {
     private volatile State state = State.Stopped;
 
     protected enum State {
-        Stopped, Starting, Started, Stopping
+        Stopped, Starting, Started, Stopping, Terminated
     }
 
     public AbstractReplicator(Topic localTopic, String replicatorPrefix, String localCluster, String remoteCluster,
@@ -109,6 +109,9 @@ public abstract class AbstractReplicator {
     // This method needs to be synchronized with disconnects else if there is a disconnect followed by startProducer
     // the end result can be disconnect.
     public synchronized void startProducer() {
+        if (STATE_UPDATER.get(this) == State.Terminated) {
+            return;
+        }
         if (STATE_UPDATER.get(this) == State.Stopping) {
             long waitTimeMs = backOff.next();
             if (log.isDebugEnabled()) {
@@ -182,14 +185,14 @@ public abstract class AbstractReplicator {
         }, brokerService.executor());
     }
 
-    protected synchronized CompletableFuture<Void> closeProducerAsync() {
+    protected synchronized CompletableFuture<Void> closeProducerAsync(Runnable onClosed) {
         if (producer == null) {
-            STATE_UPDATER.set(this, State.Stopped);
+            onClosed.run();
             return CompletableFuture.completedFuture(null);
         }
         CompletableFuture<Void> future = producer.closeAsync();
         return future.thenRun(() -> {
-            STATE_UPDATER.set(this, State.Stopped);
+            onClosed.run();
             this.producer = null;
             // deactivate further read
             disableReplicatorRead();
@@ -200,17 +203,25 @@ public abstract class AbstractReplicator {
                             + " retrying again in {} s",
                     topicName, localCluster, remoteCluster, ex.getMessage(), waitTimeMs / 1000.0);
             // BackOff before retrying
-            brokerService.executor().schedule(this::closeProducerAsync, waitTimeMs, TimeUnit.MILLISECONDS);
+            brokerService.executor().schedule(()->this.closeProducerAsync(onClosed), waitTimeMs, TimeUnit.MILLISECONDS);
             return null;
         });
     }
 
-
-    public CompletableFuture<Void> disconnect() {
-        return disconnect(false);
+    protected synchronized CompletableFuture<Void> closeProducerAsync() {
+        return closeProducerAsync(() -> STATE_UPDATER.set(this, State.Stopped));
     }
 
-    public synchronized CompletableFuture<Void> disconnect(boolean failIfHasBacklog) {
+    @Override
+    public CompletableFuture<Void> terminate() {
+        if (STATE_UPDATER.getAndSet(this, State.Terminated) == State.Terminated) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return internalDisconnect(false, () -> {
+        });
+    }
+
+    protected CompletableFuture<Void> internalDisconnect(boolean failIfHasBacklog, Runnable onClosed) {
         if (failIfHasBacklog && getNumberOfEntriesInBacklog() > 0) {
             CompletableFuture<Void> disconnectFuture = new CompletableFuture<>();
             disconnectFuture.completeExceptionally(new TopicBusyException("Cannot close a replicator with backlog"));
@@ -234,7 +245,15 @@ public abstract class AbstractReplicator {
                     remoteCluster, getReplicatorReadPosition(), getNumberOfEntriesInBacklog());
         }
 
-        return closeProducerAsync();
+        return closeProducerAsync(onClosed);
+    }
+
+    public CompletableFuture<Void> disconnect() {
+        return disconnect(false);
+    }
+
+    public synchronized CompletableFuture<Void> disconnect(boolean failIfHasBacklog) {
+        return internalDisconnect(failIfHasBacklog, () -> STATE_UPDATER.set(this, State.Stopped));
     }
 
     public CompletableFuture<Void> remove() {

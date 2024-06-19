@@ -18,29 +18,38 @@
  */
 package org.apache.pulsar.broker.service;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertTrue;
+import static org.testng.Assert.assertNotEquals;
 import java.lang.reflect.Field;
-import java.util.Optional;
+import java.time.Duration;
+import java.util.Arrays;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.broker.BrokerTestUtil;
 import org.apache.pulsar.broker.service.persistent.PersistentReplicator;
 import org.apache.pulsar.broker.service.persistent.PersistentTopic;
+import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.api.Consumer;
+import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.MessageId;
 import org.apache.pulsar.client.api.Producer;
+import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.impl.ProducerImpl;
 import org.apache.pulsar.common.policies.data.TopicStats;
 import org.apache.pulsar.common.util.FutureUtil;
-import org.junit.Assert;
 import org.awaitility.Awaitility;
+import org.junit.Assert;
 import org.mockito.Mockito;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
+@Slf4j
 @Test(groups = "broker")
 public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
 
@@ -54,15 +63,6 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
     @AfterClass(alwaysRun = true, timeOut = 300000)
     public void cleanup() throws Exception {
         super.cleanup();
-    }
-
-    private void waitReplicatorStarted(String topicName) {
-        Awaitility.await().untilAsserted(() -> {
-            Optional<Topic> topicOptional2 = pulsar2.getBrokerService().getTopic(topicName, false).get();
-            assertTrue(topicOptional2.isPresent());
-            PersistentTopic persistentTopic2 = (PersistentTopic) topicOptional2.get();
-            assertFalse(persistentTopic2.getProducers().isEmpty());
-        });
     }
 
     /**
@@ -81,7 +81,7 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
 
     @Test
     public void testReplicatorProducerStatInTopic() throws Exception {
-        final String topicName = BrokerTestUtil.newUniqueName("persistent://" + defaultNamespace + "/tp_");
+        final String topicName = BrokerTestUtil.newUniqueName("persistent://" + replicatedNamespace + "/tp_");
         final String subscribeName = "subscribe_1";
         final byte[] msgValue = "test".getBytes();
 
@@ -112,13 +112,13 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
 
     @Test
     public void testCreateRemoteConsumerFirst() throws Exception {
-        final String topicName = BrokerTestUtil.newUniqueName("persistent://" + defaultNamespace + "/tp_");
+        final String topicName = BrokerTestUtil.newUniqueName("persistent://" + replicatedNamespace + "/tp_");
         Producer<String> producer1 = client1.newProducer(Schema.STRING).topic(topicName).create();
 
         // The topic in cluster2 has a replicator created producer(schema Auto_Produce), but does not have any schema。
         // Verify: the consumer of this cluster2 can create successfully.
         Consumer<String> consumer2 = client2.newConsumer(Schema.STRING).topic(topicName).subscriptionName("s1")
-                .subscribe();;
+                .subscribe();
         // Wait for replicator started.
         waitReplicatorStarted(topicName);
         // cleanup.
@@ -132,7 +132,7 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
 
     @Test
     public void testTopicCloseWhenInternalProducerCloseErrorOnce() throws Exception {
-        final String topicName = BrokerTestUtil.newUniqueName("persistent://" + defaultNamespace + "/tp_");
+        final String topicName = BrokerTestUtil.newUniqueName("persistent://" + replicatedNamespace + "/tp_");
         admin1.topics().createNonPartitionedTopic(topicName);
         // Wait for replicator started.
         waitReplicatorStarted(topicName);
@@ -158,5 +158,103 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
             admin1.topics().delete(topicName);
             admin2.topics().delete(topicName);
         });
+    }
+
+    private String getTheLatestMessage(String topic, PulsarClient client, PulsarAdmin admin) throws Exception {
+        String dummySubscription = "s_" + UUID.randomUUID().toString().replace("-", "");
+        admin.topics().createSubscription(topic, dummySubscription, MessageId.earliest);
+        Consumer<String> c = client.newConsumer(Schema.STRING).topic(topic).subscriptionName(dummySubscription)
+                .subscribe();
+        String lastMsgValue = null;
+        while (true) {
+            Message<String> msg = c.receive(2, TimeUnit.SECONDS);
+            if (msg == null) {
+                break;
+            }
+            lastMsgValue = msg.getValue();
+        }
+        c.unsubscribe();
+        return lastMsgValue;
+    }
+
+    enum ReplicationLevel {
+        TOPIC_LEVEL,
+        NAMESPACE_LEVEL;
+    }
+
+    @DataProvider(name = "replicationLevels")
+    public Object[][] replicationLevels() {
+        return new Object[][]{
+                {ReplicationLevel.TOPIC_LEVEL},
+                {ReplicationLevel.NAMESPACE_LEVEL}
+        };
+    }
+
+    @Test(dataProvider = "replicationLevels")
+    public void testReloadWithTopicLevelGeoReplication(ReplicationLevel replicationLevel) throws Exception {
+        final String topicName = ((Supplier<String>) () -> {
+            if (replicationLevel.equals(ReplicationLevel.TOPIC_LEVEL)) {
+                return BrokerTestUtil.newUniqueName("persistent://" + nonReplicatedNamespace + "/tp_");
+            } else {
+                return BrokerTestUtil.newUniqueName("persistent://" + replicatedNamespace + "/tp_");
+            }
+        }).get();
+        admin1.topics().createNonPartitionedTopic(topicName);
+        admin2.topics().createNonPartitionedTopic(topicName);
+        admin2.topics().createSubscription(topicName, "s1", MessageId.earliest);
+        if (replicationLevel.equals(ReplicationLevel.TOPIC_LEVEL)) {
+            admin1.topics().setReplicationClusters(topicName, Arrays.asList(cluster1, cluster2));
+        } else {
+            pulsar1.getConfig().setTopicLevelPoliciesEnabled(false);
+        }
+        verifyReplicationWorks(topicName);
+
+        /**
+         * Verify:
+         * 1. Inject an error to make the replicator is not able to work.
+         * 2. Send one message, since the replicator does not work anymore, this message will not be replicated.
+         * 3. Unload topic, the replicator will be re-created.
+         * 4. Verify: the message can be replicated to the remote cluster.
+         */
+        // Step 1: Inject an error to make the replicator is not able to work.
+        Replicator replicator = broker1.getTopic(topicName, false).join().get().getReplicators().get(cluster2);
+        assertThat(replicator.terminate()).succeedsWithin(5, TimeUnit.SECONDS);
+
+        // Step 2: Send one message, since the replicator does not work anymore, this message will not be replicated.
+        String msg = UUID.randomUUID().toString();
+        Producer p1 = client1.newProducer(Schema.STRING).topic(topicName).create();
+        p1.send(msg);
+        p1.close();
+        // The result of "peek message" will be the messages generated, so it is not the same as the message just sent.
+        Thread.sleep(3000);
+        assertNotEquals(getTheLatestMessage(topicName, client2, admin2), msg);
+        assertEquals(admin1.topics().getStats(topicName).getReplication().get(cluster2).getReplicationBacklog(), 1);
+
+        // Step 3: Unload topic, the replicator will be re-created.
+        admin1.topics().unload(topicName);
+
+        // Step 4. Verify: the message can be replicated to the remote cluster.
+        Awaitility.await().atMost(Duration.ofSeconds(300)).untilAsserted(() -> {
+            log.info("replication backlog: {}",
+                    admin1.topics().getStats(topicName).getReplication().get(cluster2).getReplicationBacklog());
+            assertEquals(admin1.topics().getStats(topicName).getReplication().get(cluster2).getReplicationBacklog(), 0);
+            assertEquals(getTheLatestMessage(topicName, client2, admin2), msg);
+        });
+
+        // Cleanup.
+        if (replicationLevel.equals(ReplicationLevel.TOPIC_LEVEL)) {
+            admin1.topics().setReplicationClusters(topicName, Arrays.asList(cluster1));
+            Awaitility.await().untilAsserted(() -> {
+                assertEquals(broker1.getTopic(topicName, false).join().get().getReplicators().size(), 0);
+            });
+            admin1.topics().delete(topicName, false);
+            admin2.topics().delete(topicName, false);
+        } else {
+            pulsar1.getConfig().setTopicLevelPoliciesEnabled(true);
+            cleanupTopics(() -> {
+                admin1.topics().delete(topicName);
+                admin2.topics().delete(topicName);
+            });
+        }
     }
 }
