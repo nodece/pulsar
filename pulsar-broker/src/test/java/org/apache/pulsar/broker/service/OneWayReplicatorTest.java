@@ -24,11 +24,14 @@ import static org.testng.Assert.assertNotEquals;
 import java.lang.reflect.Field;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.broker.BrokerTestUtil;
+import org.apache.pulsar.broker.resources.ClusterResources;
 import org.apache.pulsar.broker.service.persistent.PersistentReplicator;
 import org.apache.pulsar.broker.service.persistent.PersistentTopic;
 import org.apache.pulsar.client.admin.PulsarAdmin;
@@ -39,6 +42,8 @@ import org.apache.pulsar.client.api.Producer;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.impl.ProducerImpl;
+import org.apache.pulsar.common.policies.data.ClusterData;
+import org.apache.pulsar.common.policies.data.TenantInfo;
 import org.apache.pulsar.common.policies.data.TopicStats;
 import org.apache.pulsar.common.util.FutureUtil;
 import org.awaitility.Awaitility;
@@ -256,5 +261,30 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
                 admin2.topics().delete(topicName);
             });
         }
+    }
+
+    @Test(timeOut = 30 * 1000)
+    public void testCreateRemoteAdminFailed() throws Exception {
+        final TenantInfo tenantInfo = admin1.tenants().getTenantInfo(defaultTenant);
+        final String ns1 = defaultTenant + "/ns_" + UUID.randomUUID().toString().replace("-", "");
+        final String randomClusterName = "c_" + UUID.randomUUID().toString().replace("-", "");
+        final String topic = BrokerTestUtil.newUniqueName(ns1 + "/tp");
+        admin1.namespaces().createNamespace(ns1);
+        admin1.topics().createPartitionedTopic(topic, 2);
+
+        // Inject a wrong cluster data which with empty fields.
+        ClusterResources clusterResources = broker1.getPulsar().getPulsarResources().getClusterResources();
+        clusterResources.createCluster(randomClusterName, ClusterData.builder().build());
+        Set<String> allowedClusters = new HashSet<>(tenantInfo.getAllowedClusters());
+        allowedClusters.add(randomClusterName);
+        admin1.tenants().updateTenant(defaultTenant, TenantInfo.builder().adminRoles(tenantInfo.getAdminRoles())
+                .allowedClusters(allowedClusters).build());
+
+        // Verify.
+        admin1.topics().setReplicationClusters(topic, Arrays.asList(cluster1, randomClusterName));
+
+        // cleanup.
+        admin1.topics().deletePartitionedTopic(topic);
+        admin1.tenants().updateTenant(defaultTenant, tenantInfo);
     }
 }
