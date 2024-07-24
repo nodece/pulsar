@@ -246,7 +246,8 @@ public class WebServer {
      * @param requireAuthentication A boolean indicating whether authentication is required for this resource.
      */
     public void addRestResource(String basePath, String attribute, Object attributeValue,
-                                Class<?> resourceClass, boolean requireAuthentication) {        ResourceConfig config = new ResourceConfig();
+                                Class<?> resourceClass, boolean requireAuthentication) {
+        ResourceConfig config = new ResourceConfig();
         config.register(resourceClass);
         config.register(JsonMapperProvider.class);
         ServletHolder servletHolder = new ServletHolder(new ServletContainer(config));
