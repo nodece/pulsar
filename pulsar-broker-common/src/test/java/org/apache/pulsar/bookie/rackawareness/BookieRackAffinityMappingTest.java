@@ -348,7 +348,7 @@ public class BookieRackAffinityMappingTest {
 
         racks = mapping
                 .resolve(Lists.newArrayList(BOOKIE1.getHostName(), BOOKIE2.getHostName(), BOOKIE3.getHostName()))
-                .stream().filter(Objects::nonNull).toList();
+                .stream().filter(Objects::nonNull).collect(Collectors.toList());
         assertEquals(racks.size(), 1);
         assertEquals(racks.get(0), "/rack0");
         assertEquals(knownBookies.size(), 3);

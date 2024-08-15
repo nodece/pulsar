@@ -124,11 +124,10 @@ public class BookieRackAffinityMapping extends AbstractDNSToSwitchMapping
         store.registerListener(this::handleUpdates);
 
         try {
-            var racksWithHost = bookieMappingCache.get(BOOKIE_INFO_ROOT_PATH)
+            BookiesRackConfiguration racksWithHost = bookieMappingCache.get(BOOKIE_INFO_ROOT_PATH)
                     .thenApply(optRes -> optRes.orElseGet(BookiesRackConfiguration::new))
                     .get();
-
-            for (var bookieMapping : racksWithHost.values()) {
+            for (Map<String, BookieInfo> bookieMapping : racksWithHost.values()) {
                 for (String address : bookieMapping.keySet()) {
                     bookieAddressListLastTime.add(BookieId.parse(address));
                 }
