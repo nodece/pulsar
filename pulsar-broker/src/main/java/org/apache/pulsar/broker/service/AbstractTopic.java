@@ -1173,7 +1173,10 @@ public abstract class AbstractTopic implements Topic, TopicPolicyListener<TopicP
             this.resourceGroupPublishLimiter = null;
             this.resourceGroupDispatchRateLimiter = Optional.empty();
             this.resourceGroupRateLimitingEnabled = false;
-            brokerService.getPulsar().getResourceGroupServiceManager().unRegisterTopic(TopicName.get(topic));
+        }
+        ResourceGroupService resourceGroupServiceManager = brokerService.getPulsar().getResourceGroupServiceManager();
+        if (resourceGroupServiceManager != null) {
+            resourceGroupServiceManager.unRegisterTopic(TopicName.get(topic));
         }
     }
 
