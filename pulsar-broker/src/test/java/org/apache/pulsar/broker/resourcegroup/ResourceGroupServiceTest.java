@@ -290,13 +290,9 @@ public class ResourceGroupServiceTest extends MockedPulsarServiceBaseTest {
     }
 
     @Test
-    public void testCleanupStatsWhenNamespaceDeleted()
-            throws PulsarAdminException, PulsarClientException, InterruptedException {
+    public void testCleanupStatsWhenUnRegisterTopic()
+            throws PulsarAdminException {
         String tenantName = UUID.randomUUID().toString();
-        admin.tenants().createTenant(tenantName,
-                TenantInfo.builder().allowedClusters(new HashSet<>(admin.clusters().getClusters())).build());
-        String nsName = tenantName + "/" + UUID.randomUUID();
-        admin.namespaces().createNamespace(nsName);
         org.apache.pulsar.common.policies.data.ResourceGroup rgConfig =
                 new org.apache.pulsar.common.policies.data.ResourceGroup();
         final String rgName = UUID.randomUUID().toString();
@@ -307,32 +303,80 @@ public class ResourceGroupServiceTest extends MockedPulsarServiceBaseTest {
         rgConfig.setReplicationDispatchRateInBytes(2000L);
         rgConfig.setReplicationDispatchRateInMsgs(400L);
 
-        admin.resourcegroups().createResourceGroup(rgName, rgConfig);
-        admin.namespaces().setNamespaceResourceGroup(nsName, rgName);
-        Awaitility.await().ignoreExceptions().untilAsserted(() -> {
-            Assert.assertNotNull(rgs.getNamespaceResourceGroup(NamespaceName.get(nsName)));
-        });
+        rgs.resourceGroupCreate(rgName, rgConfig);
+        String nsName = tenantName + "/" + UUID.randomUUID();
+        TopicName topicName = TopicName.get(nsName + "/" + UUID.randomUUID());
+        String topic = topicName.toString();
 
-        String topic = nsName + "/" + UUID.randomUUID();
-        @Cleanup
-        Producer<byte[]> producer =
-                pulsarClient.newProducer().topic(topic).create();
-        producer.send("hi".getBytes(StandardCharsets.UTF_8));
+        rgs.registerTopic(rgName, topicName);
 
-        rgs.aggregateResourceGroupLocalUsages();
-        producer.close();
+        // Simulate replicator
+        rgs.updateStatsWithDiff(topic, "remote-cluster", tenantName, nsName, 1, 1,
+                ResourceGroupMonitoringClass.ReplicationDispatch);
+        rgs.updateStatsWithDiff(topic, null, tenantName, nsName, 1, 1,
+                ResourceGroupMonitoringClass.Publish);
+        rgs.updateStatsWithDiff(topic, null, tenantName, nsName, 1, 1,
+                ResourceGroupMonitoringClass.Dispatch);
         Assert.assertEquals(rgs.getTopicProduceStats().asMap().size(), 1);
+        Assert.assertEquals(rgs.getTopicConsumeStats().asMap().size(), 1);
+        Assert.assertEquals(rgs.getReplicationDispatchStats().asMap().size(), 1);
+        Assert.assertEquals(rgs.getTopicToReplicatorsMap().size(), 1);
+        Set<String> replicators = rgs.getTopicToReplicatorsMap().get(rgs.getTopicToReplicatorsMap().keys().nextElement());
+        Assert.assertEquals(replicators.size(), 1);
+
+        rgs.unRegisterTopic(TopicName.get(topic));
+
+        Assert.assertEquals(rgs.getTopicProduceStats().asMap().size(), 0);
         Assert.assertEquals(rgs.getTopicConsumeStats().asMap().size(), 0);
         Assert.assertEquals(rgs.getReplicationDispatchStats().asMap().size(), 0);
-        admin.topics().delete(topic);
-        admin.namespaces().deleteNamespace(nsName);
-        admin.resourcegroups().deleteResourceGroup(rgName);
-        Awaitility.await().untilAsserted(() -> {
-            Assert.assertEquals(rgs.getTopicProduceStats().asMap().size(), 0);
-            Assert.assertEquals(rgs.getTopicConsumeStats().asMap().size(), 0);
-            Assert.assertEquals(rgs.getReplicationDispatchStats().asMap().size(), 0);
-            Assert.assertNull(rgs.getNamespaceResourceGroup(NamespaceName.get(nsName)));
-        });
+        Assert.assertEquals(rgs.getReplicationDispatchStats().asMap().size(), 0);
+        Assert.assertEquals(rgs.getTopicToReplicatorsMap().size(), 0);
+
+        rgs.resourceGroupDelete(rgName);
+    }
+
+    @Test
+    public void testCleanupStatsWhenUnRegisterNamespace()
+            throws PulsarAdminException {
+        String tenantName = UUID.randomUUID().toString();
+        org.apache.pulsar.common.policies.data.ResourceGroup rgConfig =
+                new org.apache.pulsar.common.policies.data.ResourceGroup();
+        final String rgName = UUID.randomUUID().toString();
+        rgConfig.setPublishRateInBytes(15000L);
+        rgConfig.setPublishRateInMsgs(100);
+        rgConfig.setDispatchRateInBytes(40000L);
+        rgConfig.setDispatchRateInMsgs(500);
+        rgConfig.setReplicationDispatchRateInBytes(2000L);
+        rgConfig.setReplicationDispatchRateInMsgs(400L);
+
+        rgs.resourceGroupCreate(rgName, rgConfig);
+        String nsName = tenantName + "/" + UUID.randomUUID();
+        TopicName topicName = TopicName.get(nsName + "/" + UUID.randomUUID());
+        String topic = topicName.toString();
+
+        rgs.registerNameSpace(rgName, topicName.getNamespaceObject());
+
+        // Simulate replicator
+        rgs.updateStatsWithDiff(topic, "remote-cluster", tenantName, nsName, 1, 1,
+                ResourceGroupMonitoringClass.ReplicationDispatch);
+        rgs.updateStatsWithDiff(topic, null, tenantName, nsName, 1, 1,
+                ResourceGroupMonitoringClass.Publish);
+        rgs.updateStatsWithDiff(topic, null, tenantName, nsName, 1, 1,
+                ResourceGroupMonitoringClass.Dispatch);
+        Assert.assertEquals(rgs.getTopicProduceStats().asMap().size(), 1);
+        Assert.assertEquals(rgs.getTopicConsumeStats().asMap().size(), 1);
+        Assert.assertEquals(rgs.getReplicationDispatchStats().asMap().size(), 1);
+        Set<String> replicators = rgs.getTopicToReplicatorsMap().get(rgs.getTopicToReplicatorsMap().keys().nextElement());
+        Assert.assertEquals(replicators.size(), 1);
+
+        rgs.unRegisterNameSpace(rgName, topicName.getNamespaceObject());
+
+        Assert.assertEquals(rgs.getTopicProduceStats().asMap().size(), 0);
+        Assert.assertEquals(rgs.getTopicConsumeStats().asMap().size(), 0);
+        Assert.assertEquals(rgs.getReplicationDispatchStats().asMap().size(), 0);
+        Assert.assertEquals(rgs.getTopicToReplicatorsMap().size(), 0);
+
+        rgs.resourceGroupDelete(rgName);
     }
 
     @Test

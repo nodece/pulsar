@@ -26,6 +26,7 @@ import io.prometheus.client.Counter;
 import io.prometheus.client.Gauge;
 import io.prometheus.client.Summary;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -33,6 +34,7 @@ import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.stream.Collectors;
 import lombok.Getter;
 import lombok.val;
 import org.apache.pulsar.broker.PulsarService;
@@ -311,19 +313,20 @@ public class ResourceGroupService implements AutoCloseable{
         topicToReplicatorsMap.forEach((key, value) -> {
             TopicName topicName = TopicName.get(key);
             if (topicName.getNamespaceObject().equals(fqNamespaceName)) {
-                value.forEach(n -> invalidateAllKeyForReplication.add(key));
+                topicToReplicatorsMap.remove(key);
+                value.forEach(n -> invalidateAllKeyForReplication.add(getReplicatorKey(topicName.toString(), n)));
             }
         });
         replicationDispatchStats.invalidateAll(invalidateAllKeyForReplication);
 
-        Set<TopicName> invalidateAllKeyForConsumer = new HashSet<>();
+        Set<String> invalidateAllKeyForConsumer = new HashSet<>();
         topicConsumeStats.asMap().forEach((key, value) -> {
             TopicName topicName = TopicName.get(key);
             if (topicName.getNamespaceObject().equals(fqNamespaceName)) {
-                invalidateAllKeyForConsumer.add(topicName);
+                invalidateAllKeyForConsumer.add(key);
             }
         });
-        topicConsumeStats.invalidate(invalidateAllKeyForConsumer);
+        topicConsumeStats.invalidateAll(invalidateAllKeyForConsumer);
 
         aggregateLock.unlock();
         // Dissociate this NS-name from the RG.
@@ -369,12 +372,14 @@ public class ResourceGroupService implements AutoCloseable{
             remove.registerUsage(topicNameString, ResourceGroupRefTypes.Topics,
                     false, this.resourceUsageTransportManagerMgr);
             rgTopicUnRegisters.labels(remove.resourceGroupName).inc();
-            topicProduceStats.invalidate(topicNameString);
-            topicConsumeStats.invalidate(topicNameString);
-            Set<String> replicators = topicToReplicatorsMap.remove(topicNameString);
-            if (replicators != null) {
-                replicationDispatchStats.invalidateAll(replicators);
-            }
+        }
+        topicProduceStats.invalidate(topicNameString);
+        topicConsumeStats.invalidate(topicNameString);
+        Set<String> replicators = topicToReplicatorsMap.remove(topicNameString);
+        if (replicators != null) {
+            List<String> keys = replicators.stream().map(n -> getReplicatorKey(topicNameString, n))
+                    .collect(Collectors.toList());
+            replicationDispatchStats.invalidateAll(keys);
         }
         aggregateLock.unlock();
     }
@@ -577,7 +582,7 @@ public class ResourceGroupService implements AutoCloseable{
         String key;
         if (monClass == ResourceGroupMonitoringClass.ReplicationDispatch) {
             key = getReplicatorKey(topicName, replicationRemoteCluster);
-            topicToReplicatorsMap.compute(key, (n, value) -> {
+            topicToReplicatorsMap.compute(topicName, (n, value) -> {
                 if (value == null) {
                     value = new CopyOnWriteArraySet<>();
                 }
