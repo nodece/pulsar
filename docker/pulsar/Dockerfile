@@ -79,26 +79,21 @@ RUN sed -i -e "s|http://archive\.ubuntu\.com/ubuntu/|${UBUNTU_MIRROR:-http://arc
      && echo 'Acquire::http::Timeout "30";\nAcquire::http::ConnectionAttemptDelayMsec "2000";\nAcquire::https::Timeout "30";\nAcquire::https::ConnectionAttemptDelayMsec "2000";\nAcquire::ftp::Timeout "30";\nAcquire::ftp::ConnectionAttemptDelayMsec "2000";\nAcquire::Retries "15";' > /etc/apt/apt.conf.d/99timeout_and_retries \
      && apt-get update \
      && apt-get -y dist-upgrade \
-     && apt-get -y install --no-install-recommends netcat dnsutils less procps iputils-ping \
+     && apt-get -y install --no-install-recommends netcat dnsutils less procps iputils-ping vim \
                  python3 python3-kazoo python3-pip \
-                 curl ca-certificates wget apt-transport-https
-
-#If not upgraded, it will affect the installation of grpcio.
-RUN python3 -m pip install --upgrade pip
+                 curl ca-certificates wget apt-transport-https \
+     && apt-get -y --purge autoremove \
+     && apt-get autoclean \
+     && apt-get clean \
+     && rm -rf /var/lib/apt/lists/* \
+     && update-alternatives --install /usr/bin/python python /usr/bin/python3 10 \
+     && pip3 install --no-cache-dir --upgrade pip \
+     && pip3 install --no-cache-dir pyyaml==5.4.1
 
 # Copy Eclipse Temurin Package
 ENV JAVA_HOME=/opt/java/openjdk
 ENV PATH="$PATH:$JAVA_HOME/bin"
 COPY --from=jre-build /javaruntime $JAVA_HOME
-
-# Cleanup apt
-RUN apt-get -y --purge autoremove \
-     && apt-get autoclean \
-     && apt-get clean \
-     && rm -rf /var/lib/apt/lists/*
-
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3 10
-RUN pip3 install pyyaml==5.4.1
 
 # Pulsar currently writes to the below directories, assuming the default configuration.
 # Note that number 4 is the reason that pulsar components need write access to the /pulsar directory.
