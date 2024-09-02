@@ -170,6 +170,10 @@ public class PulsarAdminToolTest {
 
         brokerStats.run(split("monitoring-metrics"));
         verify(mockBrokerStats).getMetrics();
+
+        doReturn(null).when(mockBrokerStats).getAllocatorStats("default");
+        brokerStats.run(split("allocator-stats default"));
+        verify(mockBrokerStats).getAllocatorStats("default");
     }
 
     @Test
