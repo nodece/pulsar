@@ -663,7 +663,7 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
 
     public CompletableFuture<Void> stopReplProducers() {
         List<CompletableFuture<Void>> closeFutures = Lists.newArrayList();
-        replicators.forEach((region, replicator) -> closeFutures.add(replicator.disconnect()));
+        replicators.forEach((region, replicator) -> closeFutures.add(replicator.terminate()));
         return FutureUtil.waitForAll(closeFutures);
     }
 
@@ -1180,7 +1180,7 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
             List<CompletableFuture<Void>> futures = new ArrayList<>();
             subscriptions.forEach((s, sub) -> futures.add(sub.disconnect()));
             if (closeIfClientsConnected) {
-                replicators.forEach((cluster, replicator) -> futures.add(replicator.disconnect()));
+                replicators.forEach((cluster, replicator) -> futures.add(replicator.terminate()));
                 producers.values().forEach(producer -> futures.add(producer.disconnect()));
             }
             FutureUtil.waitForAll(futures).thenRun(() -> {
@@ -1303,7 +1303,7 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
         List<CompletableFuture<Void>> futures = Lists.newArrayList();
 
         futures.add(transactionBuffer.closeAsync());
-        replicators.forEach((cluster, replicator) -> futures.add(replicator.disconnect()));
+        replicators.forEach((cluster, replicator) -> futures.add(replicator.terminate()));
         producers.values().forEach(producer -> futures.add(producer.disconnect()));
         if (topicPublishRateLimiter != null) {
             topicPublishRateLimiter.close();

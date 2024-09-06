@@ -892,7 +892,7 @@ public class ReplicatorTest extends ReplicatorTestBase {
         pulsar2 = null;
         pulsar3.close();
         pulsar3 = null;
-        replicator.disconnect(false);
+        replicator.terminate();
         Thread.sleep(100);
         Field field = AbstractReplicator.class.getDeclaredField("producer");
         field.setAccessible(true);
