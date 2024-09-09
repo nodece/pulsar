@@ -284,7 +284,7 @@ public class PersistentTopicTest extends BrokerTestBase {
 
         assertFalse(pulsar.getBrokerService().getTopics().containsKey(topicName));
         pulsar.getBrokerService().getTopicIfExists(topicName).get();
-        assertTrue(pulsar.getBrokerService().getTopics().containsKey(topicName));
+        assertFalse(pulsar.getBrokerService().getTopics().containsKey(topicName));
 
         // ref of partitioned-topic name should be empty
         assertFalse(pulsar.getBrokerService().getTopicReference(topicName).isPresent());

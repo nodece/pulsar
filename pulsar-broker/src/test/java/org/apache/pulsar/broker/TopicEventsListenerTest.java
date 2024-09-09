@@ -121,7 +121,7 @@ public class TopicEventsListenerTest extends BrokerTestBase {
                            boolean forceDelete) throws Exception {
         String topicName = topicTypePersistence + "://" + namespace + "/" + "topic-" + UUID.randomUUID();
 
-        createTopicAndVerifyEvents(topicTypePartitioned, topicName);
+        createTopicAndVerifyEvents(topicTypePersistence, topicTypePartitioned, topicName);
 
         events.clear();
         if (topicTypePartitioned.equals("partitioned")) {
@@ -145,7 +145,7 @@ public class TopicEventsListenerTest extends BrokerTestBase {
                                      boolean forceDelete) throws Exception {
         String topicName = topicTypePersistence + "://" + namespace + "/" + "topic-" + UUID.randomUUID();
 
-        createTopicAndVerifyEvents(topicTypePartitioned, topicName);
+        createTopicAndVerifyEvents(topicTypePersistence, topicTypePartitioned, topicName);
 
         events.clear();
         admin.topics().unload(topicName);
@@ -177,7 +177,7 @@ public class TopicEventsListenerTest extends BrokerTestBase {
                                     boolean forceDelete) throws Exception {
         String topicName = topicTypePersistence + "://" + namespace + "/" + "topic-" + UUID.randomUUID();
 
-        createTopicAndVerifyEvents(topicTypePartitioned, topicName);
+        createTopicAndVerifyEvents(topicTypePersistence, topicTypePartitioned, topicName);
 
         Consumer<byte[]> consumer = pulsarClient.newConsumer().topic(topicName).subscriptionName("sub").subscribe();
         Producer<byte[]> producer = pulsarClient.newProducer().topic(topicName).create();
@@ -233,7 +233,7 @@ public class TopicEventsListenerTest extends BrokerTestBase {
     public void testTopicAutoGC(String topicTypePersistence, String topicTypePartitioned) throws Exception {
         String topicName = topicTypePersistence + "://" + namespace + "/" + "topic-" + UUID.randomUUID();
 
-        createTopicAndVerifyEvents(topicTypePartitioned, topicName);
+        createTopicAndVerifyEvents(topicTypePersistence, topicTypePartitioned, topicName);
 
         admin.namespaces().setInactiveTopicPolicies(namespace,
                 new InactiveTopicPolicies(InactiveTopicDeleteMode.delete_when_no_subscriptions, 1, true));
@@ -257,25 +257,22 @@ public class TopicEventsListenerTest extends BrokerTestBase {
         );
     }
 
-    private void createTopicAndVerifyEvents(String topicTypePartitioned, String topicName) throws Exception {
+    private void createTopicAndVerifyEvents(String topicDomain, String topicTypePartitioned, String topicName)
+            throws Exception {
         final String[] expectedEvents;
-        if (topicTypePartitioned.equals("partitioned")) {
-            topicNameToWatch = topicName + "-partition-1";
-            admin.topics().createPartitionedTopic(topicName, 2);
-            triggerPartitionsCreation(topicName);
-
+        if (topicDomain.equalsIgnoreCase("persistent") || topicTypePartitioned.equals("partitioned")) {
             expectedEvents = new String[]{
                     "LOAD__BEFORE",
                     "CREATE__BEFORE",
                     "CREATE__SUCCESS",
                     "LOAD__SUCCESS"
             };
-
         } else {
-            topicNameToWatch = topicName;
-            admin.topics().createNonPartitionedTopic(topicName);
-
             expectedEvents = new String[]{
+                    // Before https://github.com/apache/pulsar/pull/21995, Pulsar will skip create topic if the topic
+                    //   was already exists, and the action "check topic exists" will try to load Managed ledger,
+                    //   the check triggers two exrtra events: [LOAD__BEFORE, LOAD__FAILURE].
+                    //   #21995 fixed this wrong behavior, so remove these two events.
                     "LOAD__BEFORE",
                     "LOAD__FAILURE",
                     "LOAD__BEFORE",
@@ -283,7 +280,14 @@ public class TopicEventsListenerTest extends BrokerTestBase {
                     "CREATE__SUCCESS",
                     "LOAD__SUCCESS"
             };
-
+        }
+        if (topicTypePartitioned.equals("partitioned")) {
+            topicNameToWatch = topicName + "-partition-1";
+            admin.topics().createPartitionedTopic(topicName, 2);
+            triggerPartitionsCreation(topicName);
+        } else {
+            topicNameToWatch = topicName;
+            admin.topics().createNonPartitionedTopic(topicName);
         }
 
         Awaitility.waitAtMost(10, TimeUnit.SECONDS).untilAsserted(() ->

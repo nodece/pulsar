@@ -150,10 +150,11 @@ public class TopicAutoCreationTest extends ProducerConsumerBase {
                     .sendTimeout(1, TimeUnit.SECONDS)
                     .topic(topic)
                     .create();) {
-            } catch (PulsarClientException.LookupException expected) {
-                String msg = "Namespace bundle for topic (%s) not served by this instance";
+            } catch (PulsarClientException.TopicDoesNotExistException expected) {
+                // Since the "policies.deleted" is "true", the value of "isAllowAutoTopicCreationAsync" will be false,
+                // so the "TopicDoesNotExistException" is expected.
                 log.info("Expected error", expected);
-                assertTrue(expected.getMessage().contains(String.format(msg, topic))
+                assertTrue(expected.getMessage().contains(topic)
                         || expected.getMessage().contains(topicPoliciesServiceInitException));
             }
 
@@ -161,13 +162,13 @@ public class TopicAutoCreationTest extends ProducerConsumerBase {
                     .topic(topic)
                     .subscriptionName("test")
                     .subscribe();) {
-            } catch (PulsarClientException.LookupException expected) {
-                String msg = "Namespace bundle for topic (%s) not served by this instance";
+            } catch (PulsarClientException.TopicDoesNotExistException expected) {
+                // Since the "policies.deleted" is "true", the value of "isAllowAutoTopicCreationAsync" will be false,
+                // so the "TopicDoesNotExistException" is expected.
                 log.info("Expected error", expected);
-                assertTrue(expected.getMessage().contains(String.format(msg, topic))
+                assertTrue(expected.getMessage().contains(topic)
                         || expected.getMessage().contains(topicPoliciesServiceInitException));
             }
-
 
             // verify that the topic does not exist
             pulsar.getPulsarResources().getNamespaceResources()
