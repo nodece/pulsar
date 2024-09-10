@@ -95,7 +95,7 @@ public class PersistentStreamingDispatcherMultipleConsumers extends PersistentDi
         long size = entry.getLength();
         updatePendingBytesToDispatch(size);
 
-        if (sendMessagesToConsumers(readType, Lists.newArrayList(entry), ctx.isLast())) {
+        if (sendMessagesToConsumers(readType, Lists.newArrayList(entry))) {
             readMoreEntriesAsync();
         } else {
             updatePendingBytesToDispatch(-size);
