@@ -375,4 +375,9 @@ public class MockManagedLedger implements ManagedLedger {
     public void checkInactiveLedgerAndRollOver() {
 
     }
+
+    @Override
+    public void checkCursorsToCacheEntries() {
+        // no-op
+    }
 }
