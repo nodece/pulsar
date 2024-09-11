@@ -35,7 +35,7 @@ public class AdminApiTransactionMultiBrokerTest extends TransactionTestBase {
     private static final int NUM_BROKERS = 16;
     private static final int NUM_PARTITIONS = 3;
 
-    @BeforeMethod
+    @BeforeMethod(alwaysRun = true)
     protected void setup() throws Exception {
         setUpBase(NUM_BROKERS, NUM_PARTITIONS, NAMESPACE1 + "/test", 0);
     }
