@@ -56,7 +56,7 @@ public class ResourceGroupUsageAggregationOnTopicLevelTest extends ProducerConsu
     private final String PRODUCE_CONSUME_NON_PERSISTENT_TOPIC =
             "non-persistent://" + TenantAndNsName + TestProduceConsumeTopicName;
 
-    @BeforeClass
+    @BeforeClass(alwaysRun = true)
     @Override
     protected void setup() throws Exception {
         super.internalSetup();
