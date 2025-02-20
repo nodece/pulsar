@@ -1582,7 +1582,6 @@ public class TransactionTest extends TransactionTestBase {
         ScheduledExecutorService executorServiceRecover = mock(ScheduledExecutorService.class);
         // Mock serviceConfiguration.
         ServiceConfiguration serviceConfiguration = mock(ServiceConfiguration.class);
-        when(serviceConfiguration.isEnableReplicatedSubscriptions()).thenReturn(false);
         when(serviceConfiguration.isTransactionCoordinatorEnabled()).thenReturn(true);
         // Mock executorProvider.
         ExecutorProvider executorProvider = mock(ExecutorProvider.class);

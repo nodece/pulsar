@@ -193,7 +193,6 @@ public abstract class CanReconnectZKClientPulsarServiceBaseTest extends TestRetr
         config.setBacklogQuotaCheckIntervalInSeconds(5);
         config.setDefaultNumberOfNamespaceBundles(1);
         config.setAllowAutoTopicCreationType(TopicType.NON_PARTITIONED);
-        config.setEnableReplicatedSubscriptions(true);
         config.setReplicatedSubscriptionsSnapshotFrequencyMillis(1000);
         config.setTlsTrustCertsFilePath(caCertPath);
         config.setTlsCertificateFilePath(brokerCertPath);

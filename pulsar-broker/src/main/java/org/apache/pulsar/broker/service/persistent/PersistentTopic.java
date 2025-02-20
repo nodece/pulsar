@@ -925,12 +925,6 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
 
         return brokerService.checkTopicNsOwnership(getName()).thenCompose(__ -> {
             Boolean replicatedSubscriptionState = replicatedSubscriptionStateArg;
-            if (replicatedSubscriptionState != null && replicatedSubscriptionState
-                    && !brokerService.pulsar().getConfiguration().isEnableReplicatedSubscriptions()) {
-                log.warn("[{}] Replicated Subscription is disabled by broker.", getName());
-                replicatedSubscriptionState = false;
-            }
-
             if (subType == SubType.Key_Shared
                     && !brokerService.pulsar().getConfiguration().isSubscriptionKeySharedEnable()) {
                 return FutureUtil.failedFuture(
@@ -4066,16 +4060,13 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
 
     private synchronized void checkReplicatedSubscriptionControllerState(boolean shouldBeEnabled) {
         boolean isCurrentlyEnabled = replicatedSubscriptionsController.isPresent();
-        boolean isEnableReplicatedSubscriptions =
-                brokerService.pulsar().getConfiguration().isEnableReplicatedSubscriptions();
         boolean replicationEnabled = this.topicPolicies.getReplicationClusters().get().size() > 1;
 
-        if (shouldBeEnabled && !isCurrentlyEnabled && isEnableReplicatedSubscriptions && replicationEnabled) {
+        if (shouldBeEnabled && !isCurrentlyEnabled && replicationEnabled) {
             log.info("[{}] Enabling replicated subscriptions controller", topic);
             replicatedSubscriptionsController = Optional.of(new ReplicatedSubscriptionsController(this,
                     brokerService.pulsar().getConfiguration().getClusterName()));
-        } else if (isCurrentlyEnabled && (!shouldBeEnabled || !isEnableReplicatedSubscriptions
-                || !replicationEnabled)) {
+        } else if (isCurrentlyEnabled && (!shouldBeEnabled || !replicationEnabled)) {
             log.info("[{}] Disabled replicated subscriptions controller", topic);
             replicatedSubscriptionsController.ifPresent(ReplicatedSubscriptionsController::close);
             replicatedSubscriptionsController = Optional.empty();

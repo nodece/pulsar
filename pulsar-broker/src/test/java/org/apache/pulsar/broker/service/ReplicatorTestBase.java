@@ -342,7 +342,6 @@ public abstract class ReplicatorTestBase extends TestRetrySupport {
 
     public void setConfig4DefaultValue() {
         setConfigDefaults(config4, cluster4, bkEnsemble4);
-        config4.setEnableReplicatedSubscriptions(false);
     }
 
     private void setConfigDefaults(ServiceConfiguration config, String clusterName,
@@ -373,7 +372,6 @@ public abstract class ReplicatorTestBase extends TestRetrySupport {
         config.setBacklogQuotaCheckIntervalInSeconds(TIME_TO_CHECK_BACKLOG_QUOTA);
         config.setDefaultNumberOfNamespaceBundles(1);
         config.setAllowAutoTopicCreationType(TopicType.NON_PARTITIONED);
-        config.setEnableReplicatedSubscriptions(true);
         config.setReplicatedSubscriptionsSnapshotFrequencyMillis(1000);
         config.setLoadManagerClassName(getLoadManagerClassName());
     }

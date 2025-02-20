@@ -1428,11 +1428,6 @@ public class ServiceConfiguration implements PulsarConfiguration {
 
     @FieldContext(
             category = CATEGORY_SERVER,
-        doc = "Enable tracking of replicated subscriptions state across clusters.")
-    private boolean enableReplicatedSubscriptions = true;
-
-    @FieldContext(
-            category = CATEGORY_SERVER,
             doc = "Frequency of snapshots for replicated subscriptions tracking.")
     private int replicatedSubscriptionsSnapshotFrequencyMillis = 1_000;
 
