@@ -206,7 +206,7 @@ public class PersistentSubscription extends AbstractSubscription {
     public boolean setReplicated(boolean replicated) {
         replicatedControlled = replicated;
 
-        if (!replicated || !config.isEnableReplicatedSubscriptions()) {
+        if (!replicated) {
             this.replicatedSubscriptionSnapshotCache = null;
         } else if (this.replicatedSubscriptionSnapshotCache == null) {
             this.replicatedSubscriptionSnapshotCache = new ReplicatedSubscriptionSnapshotCache(subName,
@@ -215,12 +215,7 @@ public class PersistentSubscription extends AbstractSubscription {
 
         if (this.cursor != null) {
             if (replicated) {
-                if (!config.isEnableReplicatedSubscriptions()) {
-                    log.warn("[{}][{}] Failed set replicated subscription status to {}, please enable the "
-                            + "configuration enableReplicatedSubscriptions", topicName, subName, replicated);
-                } else {
-                    return this.cursor.putProperty(REPLICATED_SUBSCRIPTION_PROPERTY, 1L);
-                }
+                return this.cursor.putProperty(REPLICATED_SUBSCRIPTION_PROPERTY, 1L);
             } else {
                 return this.cursor.removeProperty(REPLICATED_SUBSCRIPTION_PROPERTY);
             }
