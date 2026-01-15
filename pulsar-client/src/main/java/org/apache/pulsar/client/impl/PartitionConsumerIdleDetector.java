@@ -38,18 +38,39 @@ class PartitionConsumerIdleDetector {
     private final ConsumerImpl<?> consumer;
     private final long idleTimeoutMs;
     private final AtomicLong lastActivityTimestamp;
+    private final boolean enabled;
 
-    PartitionConsumerIdleDetector(ConsumerImpl<?> consumer, long idleTimeoutMs) {
+    // No-op detector when idle detection is disabled
+    static PartitionConsumerIdleDetector disabled(ConsumerImpl<?> consumer) {
+        return new PartitionConsumerIdleDetector(consumer, 0, false);
+    }
+
+    static PartitionConsumerIdleDetector create(ConsumerImpl<?> consumer, long idleTimeoutMs) {
+        if (idleTimeoutMs <= 0) {
+            return disabled(consumer);
+        }
+        return new PartitionConsumerIdleDetector(consumer, idleTimeoutMs, true);
+    }
+
+    private PartitionConsumerIdleDetector(ConsumerImpl<?> consumer, long idleTimeoutMs, boolean enabled) {
         this.consumer = consumer;
         this.idleTimeoutMs = idleTimeoutMs;
-        this.lastActivityTimestamp = new AtomicLong(System.currentTimeMillis());
+        this.enabled = enabled;
+        this.lastActivityTimestamp = enabled ? new AtomicLong(System.currentTimeMillis()) : null;
     }
 
     /**
      * Mark the consumer as active (message received or acknowledged).
      */
     void markActive() {
+        if (!enabled) {
+            return;
+        }
         lastActivityTimestamp.set(System.currentTimeMillis());
+    }
+
+    boolean isEnabled() {
+        return enabled;
     }
 
     /**
@@ -58,6 +79,10 @@ class PartitionConsumerIdleDetector {
      * @return CompletableFuture that completes when the check is done
      */
     CompletableFuture<Void> checkIdleAndReconnectIfNeeded() {
+        if (!enabled) {
+            return CompletableFuture.completedFuture(null);
+        }
+        
         long idleDuration = System.currentTimeMillis() - lastActivityTimestamp.get();
         
         if (idleDuration < idleTimeoutMs) {

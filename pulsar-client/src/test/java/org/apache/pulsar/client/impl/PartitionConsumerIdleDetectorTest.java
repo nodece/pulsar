@@ -61,7 +61,6 @@ public class PartitionConsumerIdleDetectorTest {
         consumerConf = new ConsumerConfigurationData<>();
         consumerConf.setSubscriptionName("test-sub");
         consumerConf.setConsumerIdleTimeoutMs(1000); // 1 second for testing
-        consumerConf.setEnablePartitionOwnershipCheck(true);
         
         executorProvider = new ExecutorProvider(1, "PartitionConsumerIdleDetectorTest");
         internalExecutor = Executors.newSingleThreadScheduledExecutor();
@@ -77,7 +76,7 @@ public class PartitionConsumerIdleDetectorTest {
                 true));
         consumer.setState(HandlerState.State.Ready);
         
-        idleDetector = new PartitionConsumerIdleDetector(consumer, 1000);
+        idleDetector = PartitionConsumerIdleDetector.create(consumer, 1000);
     }
 
     @AfterMethod(alwaysRun = true)

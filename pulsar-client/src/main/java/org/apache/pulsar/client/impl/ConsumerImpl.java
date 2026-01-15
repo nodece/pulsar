@@ -448,12 +448,12 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
         consumerDlqMessagesCounter = ip.newCounter("pulsar.client.consumer.message.dlq", Unit.Messages,
                 "The number of messages sent to DLQ", topic, attrs);
         
-        // Initialize idle detector if enabled
+        // Initialize idle detector (either enabled or no-op based on configuration)
         long idleTimeoutMs = conf.getConsumerIdleTimeoutMs();
-        if (idleTimeoutMs > 0 && conf.isEnablePartitionOwnershipCheck()) {
-            this.idleDetector = new PartitionConsumerIdleDetector(this, idleTimeoutMs);
-            
-            // Schedule periodic check with smaller initial delay for earlier detection
+        this.idleDetector = PartitionConsumerIdleDetector.create(this, idleTimeoutMs);
+        
+        // Schedule periodic check if idle detection is enabled
+        if (idleDetector.isEnabled()) {
             this.idleCheckTask = client.timer().scheduleAtFixedRate(() -> {
                 try {
                     idleDetector.checkIdleAndReconnectIfNeeded()
@@ -467,7 +467,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                 }
             }, IDLE_CHECK_INTERVAL_MS, IDLE_CHECK_INTERVAL_MS, TimeUnit.MILLISECONDS);
         } else {
-            this.idleDetector = null;
+            this.idleCheckTask = null;
         }
         
         grabCnx();
@@ -570,9 +570,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
             }
             message = incomingMessages.take();
             messageProcessed(message);
-            if (idleDetector != null) {
-                idleDetector.markActive();
-            }
+            idleDetector.markActive();
             return beforeConsume(message);
         } catch (InterruptedException e) {
             ExceptionHandler.handleInterruptedException(e);
@@ -593,9 +591,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                 cancellationHandler.setCancelAction(() -> pendingReceives.remove(result));
             } else {
                 messageProcessed(message);
-                if (idleDetector != null) {
-                    idleDetector.markActive();
-                }
+                idleDetector.markActive();
                 result.complete(beforeConsume(message));
             }
         });
@@ -615,9 +611,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                 return null;
             }
             messageProcessed(message);
-            if (idleDetector != null) {
-                idleDetector.markActive();
-            }
+            idleDetector.markActive();
             message = listener == null ? beforeConsume(message) : message;
             return message;
         } catch (InterruptedException e) {
@@ -683,9 +677,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
             return FutureUtil.failedFuture(exception);
         }
 
-        if (idleDetector != null) {
-            idleDetector.markActive();
-        }
+        idleDetector.markActive();
 
         if (txn != null) {
             return doTransactionAcknowledgeForResponse(messageId, ackType, null, properties,
@@ -710,9 +702,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
             return FutureUtil.failedFuture(exception);
         }
         
-        if (idleDetector != null) {
-            idleDetector.markActive();
-        }
+        idleDetector.markActive();
         
         if (txn != null) {
             return doTransactionAcknowledgeForResponse(messageIdList, ackType,
@@ -909,10 +899,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
     public void negativeAcknowledge(MessageId messageId) {
         consumerNacksCounter.increment();
         negativeAcksTracker.add(messageId);
-
-        if (idleDetector != null) {
-            idleDetector.markActive();
-        }
+        idleDetector.markActive();
 
         // Ensure the message is not redelivered for ack-timeout, since we did receive an "ack"
         unAckedMessageTracker.remove(MessageIdAdvUtils.discardBatch(messageId));
@@ -922,10 +909,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
     public void negativeAcknowledge(Message<?> message) {
         consumerNacksCounter.increment();
         negativeAcksTracker.add(message);
-
-        if (idleDetector != null) {
-            idleDetector.markActive();
-        }
+        idleDetector.markActive();
 
         // Ensure the message is not redelivered for ack-timeout, since we did receive an "ack"
         unAckedMessageTracker.remove(MessageIdAdvUtils.discardBatch(message.getMessageId()));
@@ -2283,9 +2267,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
         // Second : we should synchronized `ClientCnx cnx = cnx()` to
         // prevent use old cnx to send redeliverUnacknowledgedMessages to a old broker
         synchronized (ConsumerImpl.this) {
-            if (idleDetector != null) {
-                idleDetector.markActive();
-            }
+            idleDetector.markActive();
             
             ClientCnx cnx = cnx();
             // V1 don't support redeliverUnacknowledgedMessages
