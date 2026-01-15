@@ -56,7 +56,8 @@ class PartitionConsumerIdleDetector {
         this.consumer = consumer;
         this.idleTimeoutMs = idleTimeoutMs;
         this.enabled = enabled;
-        this.lastActivityTimestamp = enabled ? new AtomicLong(System.currentTimeMillis()) : null;
+        // Always initialize to avoid null pointer issues, even when disabled
+        this.lastActivityTimestamp = new AtomicLong(System.currentTimeMillis());
     }
 
     /**
