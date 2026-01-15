@@ -453,14 +453,14 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
         if (idleTimeoutMs > 0 && conf.isEnablePartitionOwnershipCheck()) {
             this.idleDetector = new PartitionConsumerIdleDetector(this, idleTimeoutMs);
             
-            // Schedule periodic check
+            // Schedule periodic check with smaller initial delay for earlier detection
             this.idleCheckTask = client.timer().scheduleAtFixedRate(() -> {
                 idleDetector.checkIdleAndReconnectIfNeeded()
                     .exceptionally(ex -> {
                         log.warn("[{}][{}] Idle check failed", topic, subscription, ex);
                         return null;
                     });
-            }, idleTimeoutMs, IDLE_CHECK_INTERVAL_MS, TimeUnit.MILLISECONDS);
+            }, IDLE_CHECK_INTERVAL_MS, IDLE_CHECK_INTERVAL_MS, TimeUnit.MILLISECONDS);
         } else {
             this.idleDetector = null;
         }

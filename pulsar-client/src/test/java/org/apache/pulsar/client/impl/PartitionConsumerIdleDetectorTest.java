@@ -162,7 +162,7 @@ public class PartitionConsumerIdleDetectorTest {
         when(consumer.getClient()).thenReturn(client);
         when(client.getLookup()).thenReturn(mockLookup);
         
-        LookupTopicResult lookupResult = new LookupTopicResult(newAddress, newAddress, false, false);
+        LookupTopicResult lookupResult = new LookupTopicResult(newAddress, newAddress, false);
         when(mockLookup.getBroker(any(TopicName.class)))
                 .thenReturn(CompletableFuture.completedFuture(lookupResult));
         
@@ -200,7 +200,7 @@ public class PartitionConsumerIdleDetectorTest {
         when(consumer.getClient()).thenReturn(client);
         when(client.getLookup()).thenReturn(mockLookup);
         
-        LookupTopicResult lookupResult = new LookupTopicResult(sameAddress, sameAddress, false, false);
+        LookupTopicResult lookupResult = new LookupTopicResult(sameAddress, sameAddress, false);
         when(mockLookup.getBroker(any(TopicName.class)))
                 .thenReturn(CompletableFuture.completedFuture(lookupResult));
         
