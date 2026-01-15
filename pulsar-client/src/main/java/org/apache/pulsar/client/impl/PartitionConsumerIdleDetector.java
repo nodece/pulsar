@@ -166,14 +166,26 @@ class PartitionConsumerIdleDetector {
     /**
      * Reconnect the consumer with comprehensive cleanup.
      * 
+     * This method is synchronized with broker-initiated reconnections through the ConnectionHandler.
+     * If the broker has already initiated a reconnection (via CommandCloseConsumer), the 
+     * ConnectionHandler will handle the race condition and avoid duplicate reconnections.
+     * 
      * @return CompletableFuture that completes when reconnection is initiated
      */
     private CompletableFuture<Void> reconnectWithCleanup() {
+        // Check consumer state before triggering reconnection to avoid race with broker notifications
+        HandlerState.State state = consumer.getState();
+        if (state == HandlerState.State.Closing || state == HandlerState.State.Closed) {
+            // Consumer is already closing/closed, no need to reconnect
+            return CompletableFuture.completedFuture(null);
+        }
+        
         return CompletableFuture.runAsync(() -> {
             cleanupConsumerState();
         }, consumer.getInternalPinnedExecutor())
         .thenCompose(__ -> {
             // Trigger reconnection by calling reconnectLater on connection handler
+            // The ConnectionHandler will handle synchronization with broker-initiated reconnections
             consumer.getConnectionHandler().reconnectLater(
                     new PulsarClientException("Topic ownership changed, reconnecting"));
             return CompletableFuture.completedFuture(null);
