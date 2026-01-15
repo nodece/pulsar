@@ -144,6 +144,7 @@ import org.slf4j.LoggerFactory;
 
 public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandler.Connection {
     private static final int MAX_REDELIVER_UNACKNOWLEDGED = 1000;
+    private static final long IDLE_CHECK_INTERVAL_MS = 10_000; // 10 seconds
 
     final long consumerId;
 
@@ -452,14 +453,14 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
         if (idleTimeoutMs > 0 && conf.isEnablePartitionOwnershipCheck()) {
             this.idleDetector = new PartitionConsumerIdleDetector(this, idleTimeoutMs);
             
-            // Schedule periodic check every 10 seconds
+            // Schedule periodic check
             this.idleCheckTask = client.timer().scheduleAtFixedRate(() -> {
                 idleDetector.checkIdleAndReconnectIfNeeded()
                     .exceptionally(ex -> {
                         log.warn("[{}][{}] Idle check failed", topic, subscription, ex);
                         return null;
                     });
-            }, idleTimeoutMs, 10_000, TimeUnit.MILLISECONDS);
+            }, idleTimeoutMs, IDLE_CHECK_INTERVAL_MS, TimeUnit.MILLISECONDS);
         } else {
             this.idleDetector = null;
         }

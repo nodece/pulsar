@@ -99,12 +99,27 @@ class PartitionConsumerIdleDetector {
             return CompletableFuture.completedFuture(false);
         }
 
-        InetSocketAddress currentBroker = currentCnx.ctx().channel().remoteAddress();
+        // Safely get the remote address and verify it's an InetSocketAddress
+        if (!(currentCnx.ctx().channel().remoteAddress() instanceof InetSocketAddress)) {
+            log.warn("[{}][{}] Remote address is not an InetSocketAddress, skipping ownership check",
+                    consumer.getTopic(), consumer.getSubscription());
+            return CompletableFuture.completedFuture(false);
+        }
+
+        InetSocketAddress currentBroker = (InetSocketAddress) currentCnx.ctx().channel().remoteAddress();
 
         // Perform topic lookup to find the current owner
         return consumer.getClient().getLookup().getBroker(consumer.getTopicName())
                 .thenApply(lookupResult -> {
                     InetSocketAddress newBroker = lookupResult.getLogicalAddress();
+                    
+                    // Check for null to prevent NPE
+                    if (newBroker == null) {
+                        log.warn("[{}][{}] Lookup returned null logical address",
+                                consumer.getTopic(), consumer.getSubscription());
+                        return false;
+                    }
+                    
                     boolean changed = !currentBroker.equals(newBroker);
                     
                     if (changed) {
