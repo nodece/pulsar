@@ -126,7 +126,7 @@ public class PartitionConsumerIdleDetectorTest {
 
     @Test
     public void testIdleDetectionWhenNoConnection() throws Exception {
-        // Wait for idle timeout
+        // Wait for idle timeout - necessary to reach idle state
         Thread.sleep(1200);
         
         // Set no connection
@@ -142,7 +142,7 @@ public class PartitionConsumerIdleDetectorTest {
 
     @Test
     public void testOwnershipChangeDetection() throws Exception {
-        // Wait for idle timeout
+        // Wait for idle timeout - necessary to reach idle state
         Thread.sleep(1200);
         
         // Mock connection and lookup
@@ -174,14 +174,18 @@ public class PartitionConsumerIdleDetectorTest {
         CompletableFuture<Void> result = idleDetector.checkIdleAndReconnectIfNeeded();
         result.get(2, TimeUnit.SECONDS);
         
-        // Verify reconnection was triggered
-        verify(mockConnectionHandler, times(1))
-                .reconnectLater(any(PulsarClientException.class));
+        // Verify reconnection was triggered using Awaitility
+        Awaitility.await()
+                .atMost(3, TimeUnit.SECONDS)
+                .untilAsserted(() -> 
+                    verify(mockConnectionHandler, times(1))
+                            .reconnectLater(any(PulsarClientException.class))
+                );
     }
 
     @Test
     public void testNoReconnectWhenOwnershipUnchanged() throws Exception {
-        // Wait for idle timeout
+        // Wait for idle timeout - necessary to reach idle state
         Thread.sleep(1200);
         
         // Mock connection and lookup with same broker

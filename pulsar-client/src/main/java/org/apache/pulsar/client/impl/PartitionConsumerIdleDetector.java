@@ -145,26 +145,7 @@ class PartitionConsumerIdleDetector {
      */
     private CompletableFuture<Void> reconnectWithCleanup() {
         return CompletableFuture.runAsync(() -> {
-            try {
-                // 1. Clear unacked message tracker
-                consumer.getUnAckedMessageTracker().clear();
-                
-                // 2. Clear pending ack queues in acknowledgment tracker
-                consumer.getAcknowledgmentsGroupingTracker().flush();
-                
-                // 3. Clear batch message ack tracker (if exists)
-                // The batch ack tracker is internal to acknowledgment tracker
-                
-                // 4. Increment consumer epoch to reject old acks
-                consumer.incrementConsumerEpoch();
-                
-                log.info("[{}][{}] Cleaned up consumer state before reconnection",
-                        consumer.getTopic(), consumer.getSubscription());
-                
-            } catch (Exception e) {
-                log.error("[{}][{}] Error during cleanup before reconnection",
-                        consumer.getTopic(), consumer.getSubscription(), e);
-            }
+            cleanupConsumerState();
         }, consumer.getInternalPinnedExecutor())
         .thenCompose(__ -> {
             // Trigger reconnection by calling reconnectLater on connection handler
@@ -172,5 +153,31 @@ class PartitionConsumerIdleDetector {
                     new PulsarClientException("Topic ownership changed, reconnecting"));
             return CompletableFuture.completedFuture(null);
         });
+    }
+
+    /**
+     * Clean up consumer state before reconnection.
+     */
+    private void cleanupConsumerState() {
+        try {
+            // 1. Clear unacked message tracker
+            consumer.getUnAckedMessageTracker().clear();
+            
+            // 2. Clear pending ack queues in acknowledgment tracker
+            consumer.getAcknowledgmentsGroupingTracker().flush();
+            
+            // 3. Clear batch message ack tracker (if exists)
+            // The batch ack tracker is internal to acknowledgment tracker
+            
+            // 4. Increment consumer epoch to reject old acks
+            consumer.incrementConsumerEpoch();
+            
+            log.info("[{}][{}] Cleaned up consumer state before reconnection",
+                    consumer.getTopic(), consumer.getSubscription());
+            
+        } catch (Exception e) {
+            log.error("[{}][{}] Error during cleanup before reconnection",
+                    consumer.getTopic(), consumer.getSubscription(), e);
+        }
     }
 }

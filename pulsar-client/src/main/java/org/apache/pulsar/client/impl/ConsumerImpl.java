@@ -455,11 +455,16 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
             
             // Schedule periodic check with smaller initial delay for earlier detection
             this.idleCheckTask = client.timer().scheduleAtFixedRate(() -> {
-                idleDetector.checkIdleAndReconnectIfNeeded()
-                    .exceptionally(ex -> {
-                        log.warn("[{}][{}] Idle check failed", topic, subscription, ex);
-                        return null;
-                    });
+                try {
+                    idleDetector.checkIdleAndReconnectIfNeeded()
+                        .exceptionally(ex -> {
+                            log.warn("[{}][{}] Idle check failed", topic, subscription, ex);
+                            return null;
+                        });
+                } catch (Throwable t) {
+                    // Catch all exceptions to prevent thread pool corruption
+                    log.error("[{}][{}] Unexpected error in idle check task", topic, subscription, t);
+                }
             }, IDLE_CHECK_INTERVAL_MS, IDLE_CHECK_INTERVAL_MS, TimeUnit.MILLISECONDS);
         } else {
             this.idleDetector = null;
