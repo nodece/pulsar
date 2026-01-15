@@ -419,6 +419,38 @@ public class ConsumerConfigurationData<T> implements Serializable, Cloneable {
 
     private List<TopicConsumerConfigurationData> topicConfigurations = new ArrayList<>();
 
+    /**
+     * Consumer idle timeout in milliseconds.
+     * If the consumer doesn't receive messages or perform acks for this duration,
+     * it will trigger a lookup to verify topic ownership and reconnect if changed.
+     * 
+     * Set to 0 to disable idle detection.
+     * Default: 30000 (30 seconds)
+     */
+    @ApiModelProperty(
+            name = "consumerIdleTimeoutMs",
+            value = "Consumer idle timeout in milliseconds. "
+                    + "If the consumer doesn't receive messages or perform acks for this duration, "
+                    + "it will trigger a lookup to verify topic ownership and reconnect if changed. "
+                    + "Set to 0 to disable idle detection."
+    )
+    private long consumerIdleTimeoutMs = 30_000;
+
+    /**
+     * Enable partition-level topic ownership verification.
+     * When enabled, consumers will periodically check if topic ownership has changed
+     * and automatically reconnect to the new broker if needed.
+     * 
+     * Default: true
+     */
+    @ApiModelProperty(
+            name = "enablePartitionOwnershipCheck",
+            value = "Enable partition-level topic ownership verification. "
+                    + "When enabled, consumers will periodically check if topic ownership has changed "
+                    + "and automatically reconnect to the new broker if needed."
+    )
+    private boolean enablePartitionOwnershipCheck = true;
+
     public TopicConsumerConfigurationData getMatchingTopicConfiguration(String topicName) {
         return topicConfigurations.stream()
                 .filter(topicConf -> topicConf.getTopicNameMatcher().matches(topicName))
