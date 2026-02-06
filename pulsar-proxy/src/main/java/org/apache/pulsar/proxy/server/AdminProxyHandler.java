@@ -121,6 +121,8 @@ class AdminProxyHandler extends ProxyServlet {
         httpClient.setFollowRedirects(true);
         ProtocolHandlers protocolHandlers = httpClient.getProtocolHandlers();
         protocolHandlers.put(new RedirectProtocolHandler(httpClient));
+
+        httpClient.setIdleTimeout(config.getHttpProxyIdleTimeout());
     }
 
     // This class allows the request body to be replayed, the default implementation
