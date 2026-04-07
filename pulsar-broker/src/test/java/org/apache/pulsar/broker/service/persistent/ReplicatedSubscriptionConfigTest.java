@@ -55,7 +55,6 @@ public class ReplicatedSubscriptionConfigTest extends ProducerConsumerBase {
 
     @Test
     public void createReplicatedSubscription() throws Exception {
-        this.conf.setEnableReplicatedSubscriptions(true);
         String topic = BrokerTestUtil.newUniqueName("createReplicatedSubscription");
 
         @Cleanup
@@ -77,7 +76,6 @@ public class ReplicatedSubscriptionConfigTest extends ProducerConsumerBase {
 
     @Test
     public void upgradeToReplicatedSubscription() throws Exception {
-        this.conf.setEnableReplicatedSubscriptions(true);
         String topic = BrokerTestUtil.newUniqueName("upgradeToReplicatedSubscription");
 
         Consumer<String> consumer = pulsarClient.newConsumer(Schema.STRING)
@@ -103,7 +101,6 @@ public class ReplicatedSubscriptionConfigTest extends ProducerConsumerBase {
 
     @Test
     public void upgradeToReplicatedSubscriptionAfterRestart() throws Exception {
-        this.conf.setEnableReplicatedSubscriptions(true);
         String topic = BrokerTestUtil.newUniqueName("upgradeToReplicatedSubscriptionAfterRestart");
 
         Consumer<String> consumer = pulsarClient.newConsumer(Schema.STRING)
@@ -126,21 +123,6 @@ public class ReplicatedSubscriptionConfigTest extends ProducerConsumerBase {
 
         stats = admin.topics().getStats(topic);
         assertTrue(stats.getSubscriptions().get("sub").isReplicated());
-        consumer.close();
-    }
-
-    @Test
-    public void testDisableReplicatedSubscriptions() throws Exception {
-        this.conf.setEnableReplicatedSubscriptions(false);
-        String topic = BrokerTestUtil.newUniqueName("disableReplicatedSubscriptions");
-        Consumer<String> consumer = pulsarClient.newConsumer(Schema.STRING)
-                .topic(topic)
-                .subscriptionName("sub")
-                .replicateSubscriptionState(true)
-                .subscribe();
-
-        TopicStats stats = admin.topics().getStats(topic);
-        assertFalse(stats.getSubscriptions().get("sub").isReplicated());
         consumer.close();
     }
 }

@@ -143,9 +143,6 @@ public class GeoPersistentReplicator extends PersistentReplicator {
     @SuppressWarnings("unchecked")
     protected boolean replicateEntries(List<Entry> entries, final InFlightTask inFlightTask) {
         boolean atLeastOneMessageSentForReplication = false;
-        boolean isEnableReplicatedSubscriptions =
-                brokerService.pulsar().getConfiguration().isEnableReplicatedSubscriptions();
-
         try {
             // This flag is set to true when we skip at least one local message,
             // in order to skip remaining local messages.
@@ -193,9 +190,7 @@ public class GeoPersistentReplicator extends PersistentReplicator {
                     }
                 }
 
-                if (isEnableReplicatedSubscriptions) {
-                    checkReplicatedSubscriptionMarker(entry.getPosition(), msg, headersAndPayload);
-                }
+                checkReplicatedSubscriptionMarker(entry.getPosition(), msg, headersAndPayload);
 
                 if (msg.isReplicated()) {
                     // Discard messages that were already replicated into this region
