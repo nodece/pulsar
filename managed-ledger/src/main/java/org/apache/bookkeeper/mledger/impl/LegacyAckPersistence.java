@@ -55,7 +55,7 @@ import org.apache.commons.lang3.mutable.MutableInt;
  */
 class LegacyAckPersistence implements AckPersistence {
 
-    static final Logger log = Logger.get(LegacyAckPersistence.class);
+    private static final Logger log = Logger.get(LegacyAckPersistence.class);
 
     private final ManagedLedgerConfig config;
     private final ReadWriteLock lock;
@@ -164,7 +164,9 @@ class LegacyAckPersistence implements AckPersistence {
     // ---- helpers ----
 
     private static List<LongProperty> buildPropertiesMap(Map<String, Long> properties) {
-        if (properties == null || properties.isEmpty()) return Collections.emptyList();
+        if (properties == null || properties.isEmpty()) {
+            return Collections.emptyList();
+        }
         var props = new ArrayList<LongProperty>(properties.size());
         properties.forEach((k, v) -> props.add(new LongProperty().setName(k).setValue(v)));
         return props;
@@ -183,13 +185,19 @@ class LegacyAckPersistence implements AckPersistence {
     }
 
     private List<LongListMap> buildLongPropertiesMap(Map<Long, long[]> properties) {
-        if (properties.isEmpty()) return Collections.emptyList();
+        if (properties.isEmpty()) {
+            return Collections.emptyList();
+        }
         var result = new ArrayList<LongListMap>();
         var size = new MutableInt();
         properties.forEach((id, ranges) -> {
-            if (ranges == null || ranges.length == 0) return;
+            if (ranges == null || ranges.length == 0) {
+                return;
+            }
             var lm = new LongListMap().setKey(id);
-            for (long range : ranges) lm.addValue(range);
+            for (long range : ranges) {
+                lm.addValue(range);
+            }
             result.add(lm);
             size.add(lm.getSerializedSize());
         });
@@ -209,7 +217,10 @@ class LegacyAckPersistence implements AckPersistence {
             var rangeList = new ArrayList<MessageRange>();
             var truncated = new MutableBoolean(false);
             ackState.forEachRawRange((lowerKey, lowerValue, upperKey, upperValue) -> {
-                if (rangeList.size() >= maxRanges) { truncated.setTrue(); return false; }
+                if (rangeList.size() >= maxRanges) {
+                    truncated.setTrue();
+                    return false;
+                }
                 var mr = new MessageRange();
                 mr.setLowerEndpoint().setLedgerId(lowerKey).setEntryId(lowerValue);
                 mr.setUpperEndpoint().setLedgerId(upperKey).setEntryId(upperValue);
@@ -220,7 +231,9 @@ class LegacyAckPersistence implements AckPersistence {
             this.serializedSize = acksSerializedSize.get();
             ackState.resetDirtyKeys();
             if (truncated.booleanValue()) {
-                if (otelStats != null) otelStats.incrementPersistUnackedRangesTruncated(cursor);
+                if (otelStats != null) {
+                    otelStats.incrementPersistUnackedRangesTruncated(cursor);
+                }
                 if (lastCursorDataFullyPersistable.compareAndSet(true, false)) {
                     log.warn().attr("totalRanges", ackState.size()).attr("maxRanges", maxRanges)
                             .log("Individually deleted message ranges exceed managedLedgerMaxUnackedRangesToPersist.");
@@ -242,7 +255,9 @@ class LegacyAckPersistence implements AckPersistence {
             var result = ackState.buildBatchEntryDeletionIndexInfoList(maxIndexes);
             int total = ackState.getBatchDeletedIndexesSize();
             if (result.size() < total) {
-                if (otelStats != null) otelStats.incrementPersistBatchDeletedIndexesTruncated(cursor);
+                if (otelStats != null) {
+                    otelStats.incrementPersistBatchDeletedIndexesTruncated(cursor);
+                }
                 if (lastBatchDeletedIndexFullyPersistable.compareAndSet(true, false)) {
                     log.warn().attr("totalIndexes", total).attr("maxIndexes", maxIndexes)
                             .log("Batch deleted indexes exceed managedLedgerMaxBatchDeletedIndexToPersist.");

@@ -50,47 +50,31 @@ public interface AckPersistence {
 
     CompletableFuture<RecoveredState> recover(LedgerHandle lh);
 
-    default void onLedgerRollover() { }
+    default void onLedgerRollover() {
+    }
 
-    default void setZkCmHint(long cursorLedgerId, long entryId) { }
+    default void setZkCmHint(long cursorLedgerId, long entryId) {
+    }
 
-    /**
-     * Called when the mark-delete position advances past {@code mdLedgerId}.
-     * Implementations that track per-ledger state (e.g. DE+CM) should clean up stale entries.
-     */
-    default void onMarkDeleteAdvance(long mdLedgerId) { }
+    default void onMarkDeleteAdvance(long mdLedgerId) {
+    }
 
-    /**
-     * Returns {@code true} if old cursor ledgers should be deleted immediately on rollover
-     * (legacy path). Returns {@code false} when old ledgers must be kept (DE+CM cross-ledger refs).
-     */
-    default boolean shouldGcOldCursorLedgerOnRollover() { return true; }
+    default boolean shouldGcOldCursorLedgerOnRollover() {
+        return true;
+    }
 
-    /**
-     * Returns the minimum cursor ledger ID still referenced by this persistence instance,
-     * or {@code -1} if there are no tracked references.
-     */
-    default long getOldestReferencedCursorLedgerId() { return -1; }
+    default long getOldestReferencedCursorLedgerId() {
+        return -1;
+    }
 
-    /**
-     * Returns the serialized byte size of the last persisted unacked ranges (monitoring metric).
-     */
-    default int getSerializedSize() { return 0; }
+    default int getSerializedSize() {
+        return 0;
+    }
 
-    /**
-     * Builds the legacy {@link MessageRange} list for MetaStore (ZK close / fallback writes).
-     * Truncates to {@code maxRanges} and emits truncation telemetry.
-     * Returns an empty list for persistence strategies that do not use ZK ranges.
-     */
     default List<MessageRange> buildIndividualDeletedMessageRanges(BitmapAckState ackState, int maxRanges) {
         return Collections.emptyList();
     }
 
-    /**
-     * Builds the {@link BatchedEntryDeletionIndexInfo} list for MetaStore writes.
-     * Truncates to {@code maxIndexes} and emits truncation telemetry.
-     * Returns an empty list for persistence strategies that do not use ZK batch ranges.
-     */
     default List<BatchedEntryDeletionIndexInfo> buildBatchEntryDeletionIndexInfoList(
             BitmapAckState ackState, int maxIndexes) {
         return Collections.emptyList();
@@ -105,8 +89,13 @@ public interface AckPersistence {
             this.commitEntryId = commitEntryId;
         }
 
-        public long totalBytes() { return totalBytes; }
-        public long commitEntryId() { return commitEntryId; }
+        public long totalBytes() {
+            return totalBytes;
+        }
+
+        public long commitEntryId() {
+            return commitEntryId;
+        }
     }
 
     final class RecoveredState {
@@ -120,8 +109,16 @@ public interface AckPersistence {
             this.stateSize = stateSize;
         }
 
-        public PositionInfo positionInfo() { return positionInfo; }
-        public long commitEntryId() { return commitEntryId; }
-        public long stateSize() { return stateSize; }
+        public PositionInfo positionInfo() {
+            return positionInfo;
+        }
+
+        public long commitEntryId() {
+            return commitEntryId;
+        }
+
+        public long stateSize() {
+            return stateSize;
+        }
     }
 }

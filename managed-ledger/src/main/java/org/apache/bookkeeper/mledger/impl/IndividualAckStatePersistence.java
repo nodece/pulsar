@@ -19,7 +19,6 @@
 package org.apache.bookkeeper.mledger.impl;
 
 import static java.util.stream.Collectors.toList;
-
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -84,10 +83,14 @@ public class IndividualAckStatePersistence implements AckPersistence {
             for (long msgLedgerId : dirtyLedgers) {
                 var bitmap = ackState.bitmapOf(msgLedgerId);
                 var batchAcks = filterBatchAckForLedger(batchAckList, msgLedgerId);
-                if (bitmap == null && batchAcks.isEmpty()) continue;
+                if (bitmap == null && batchAcks.isEmpty()) {
+                    continue;
+                }
                 if (bitmap != null && batchAcks.isEmpty()) {
                     var last = lastAppendedBitmap.get(msgLedgerId);
-                    if (last != null && Arrays.equals(last, bitmap)) continue;
+                    if (last != null && Arrays.equals(last, bitmap)) {
+                        continue;
+                    }
                 }
                 newBitmaps.put(msgLedgerId, bitmap);
                 batchAcksByLedger.put(msgLedgerId, batchAcks);
@@ -113,19 +116,26 @@ public class IndividualAckStatePersistence implements AckPersistence {
                     long id = msgLedgerOrder.get(i);
                     lastAppendedDEPos.put(id, PositionFactory.create(lh.getId(), deFutures.get(i).join()));
                     var bm = newBitmaps.get(id);
-                    if (bm != null) lastAppendedBitmap.put(id, bm);
+                    if (bm != null) {
+                        lastAppendedBitmap.put(id, bm);
+                    }
                 }
             } finally {
                 lock.writeLock().unlock();
             }
             return wal.append(lh, buildCm(mdPos, properties, lastAppendedDEPos)).thenApply(result -> {
-                if (cmAckedCallback != null) cmAckedCallback.accept(lh.getId(), result.commitEntryId());
+                if (cmAckedCallback != null) {
+                    cmAckedCallback.accept(lh.getId(), result.commitEntryId());
+                }
                 return new PersistResult(result.totalBytes(), result.commitEntryId());
             });
         }).exceptionally(error -> {
             lock.writeLock().lock();
-            try { ackState.restoreDirtyLedgers(dirtyLedgers); }
-            finally { lock.writeLock().unlock(); }
+            try {
+                ackState.restoreDirtyLedgers(dirtyLedgers);
+            } finally {
+                lock.writeLock().unlock();
+            }
             throw new java.util.concurrent.CompletionException(error);
         });
     }
@@ -147,7 +157,9 @@ public class IndividualAckStatePersistence implements AckPersistence {
      */
     @Override
     public void onMarkDeleteAdvance(long mdLedgerId) {
-        if (mdLedgerId <= 0) return;
+        if (mdLedgerId <= 0) {
+            return;
+        }
         lock.writeLock().lock();
         try {
             lastAppendedDEPos.keySet().removeIf(id -> id < mdLedgerId);
@@ -158,7 +170,8 @@ public class IndividualAckStatePersistence implements AckPersistence {
     }
 
     @Override
-    public void setZkCmHint(long cursorLedgerId, long entryId) { }
+    public void setZkCmHint(long cursorLedgerId, long entryId) {
+    }
 
     @Override
     public boolean shouldGcOldCursorLedgerOnRollover() {
@@ -209,7 +222,9 @@ public class IndividualAckStatePersistence implements AckPersistence {
             ackState.resetDirtyKeys();
 
             if (truncated.booleanValue()) {
-                if (otelStats != null) otelStats.incrementPersistUnackedRangesTruncated(cursor);
+                if (otelStats != null) {
+                    otelStats.incrementPersistUnackedRangesTruncated(cursor);
+                }
                 log.warn()
                     .attr("totalRanges", ackState.size())
                     .attr("maxRanges", maxRanges)
@@ -230,7 +245,9 @@ public class IndividualAckStatePersistence implements AckPersistence {
                     ackState.buildBatchEntryDeletionIndexInfoList(maxIndexes);
             int totalIndexes = ackState.getBatchDeletedIndexesSize();
             if (result.size() < totalIndexes) {
-                if (otelStats != null) otelStats.incrementPersistBatchDeletedIndexesTruncated(cursor);
+                if (otelStats != null) {
+                    otelStats.incrementPersistBatchDeletedIndexesTruncated(cursor);
+                }
                 log.warn()
                     .attr("totalIndexes", totalIndexes)
                     .attr("maxIndexes", maxIndexes)
@@ -246,7 +263,9 @@ public class IndividualAckStatePersistence implements AckPersistence {
 
     private static List<BatchedEntryDeletionIndexInfo> filterBatchAckForLedger(
             List<BatchedEntryDeletionIndexInfo> list, long msgLedgerId) {
-        if (list == null || list.isEmpty()) return List.of();
+        if (list == null || list.isEmpty()) {
+            return List.of();
+        }
         return list.stream()
                 .filter(i -> i.getPosition().getLedgerId() == msgLedgerId)
                 .collect(toList());
@@ -257,8 +276,12 @@ public class IndividualAckStatePersistence implements AckPersistence {
         var de = new PositionInfo().setLedgerId(0L).setEntryId(0L);
         var range = de.addIndividualDeletedMessageRange();
         range.setKey(msgLedgerId);
-        if (bitmapBytes != null) range.setBitmap(bitmapBytes);
-        if (batchAcks != null && !batchAcks.isEmpty()) de.addAllBatchedEntryDeletionIndexInfos(batchAcks);
+        if (bitmapBytes != null) {
+            range.setBitmap(bitmapBytes);
+        }
+        if (batchAcks != null && !batchAcks.isEmpty()) {
+            de.addAllBatchedEntryDeletionIndexInfos(batchAcks);
+        }
         return markType(de, CursorWal.ENTRY_TYPE_DE);
     }
 

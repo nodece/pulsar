@@ -564,7 +564,9 @@ class PositionRangeSet implements LongPairRangeSet<Position> {
      * cursor ledger (not the old one that is about to be deleted).
      */
     void markAllDirty() {
-        if (!enableMultiEntry) return;
+        if (!enableMultiEntry) {
+            return;
+        }
         rangeBitmapMap.forEach((ledgerId, bitmap) -> {
             if (!bitmap.isEmpty() && ledgerId >= 0 && ledgerId <= Integer.MAX_VALUE) {
                 dirtyLedgers.add(ledgerId, ledgerId + 1);

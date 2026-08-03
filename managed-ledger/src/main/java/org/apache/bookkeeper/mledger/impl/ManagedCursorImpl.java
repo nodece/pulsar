@@ -36,6 +36,7 @@ import io.github.merlimat.slog.Logger;
 import java.time.Clock;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -45,10 +46,11 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 import java.util.concurrent.atomic.AtomicReference;
@@ -208,7 +210,8 @@ public class ManagedCursorImpl implements ManagedCursor {
     private volatile long pendingCmHintEntryId = -1;
     // DE+CM old cursor ledger GC: track ledger IDs that may be referenced by CM.
     // Cleared when they fall below oldestReferencedCursorLedgerId.
-    private final java.util.Set<Long> oldCursorLedgerIds = new java.util.concurrent.ConcurrentHashMap<Long, Boolean>().keySet(true);
+    private final Set<Long> oldCursorLedgerIds =
+            ConcurrentHashMap.newKeySet();
     private volatile long oldestReferencedCursorLedgerId = Long.MAX_VALUE;
 
     // entry-type discriminator stored in PositionInfo.properties (LongProperty).
@@ -365,9 +368,8 @@ public class ManagedCursorImpl implements ManagedCursor {
         this.ledger = ledger;
         this.name = cursorName;
         this.log = slog.with().ctx(ledger.getLogger()).attr("cursor", name).build();
-        // enableMultiEntry controls whether markDirty runs on each addOpenClosed. Both
-        // persistentUnackedRangesWithMultipleEntriesEnabled (P1: sharded PositionInfo) and
-        // persistentUnackedRangesWithPerLedgerEntryEnabled (P2: DE+CM) need dirty tracking to drive per-msgLedger writes.
+        // Both persistentUnackedRangesWithMultipleEntriesEnabled and
+        // persistentUnackedRangesWithPerLedgerEntryEnabled need dirty tracking.
         boolean enableDirtyTracking = getConfig().isPersistentUnackedRangesWithMultipleEntriesEnabled()
                 || getConfig().isPersistentUnackedRangesWithPerLedgerEntryEnabled();
         this.ackState = new BitmapAckState(positionRangeConverter, enableDirtyTracking,
@@ -3991,6 +3993,11 @@ public class ManagedCursorImpl implements ManagedCursor {
 
     private boolean isCompactionCursor() {
         return COMPACTION_CURSOR_NAME.equals(name);
+    }
+
+    @VisibleForTesting
+    public ConcurrentSkipListMap<Position, BitSet> getBatchDeletedIndexes() {
+        return ackState.getBatchDeletedIndexes();
     }
 
     @VisibleForTesting

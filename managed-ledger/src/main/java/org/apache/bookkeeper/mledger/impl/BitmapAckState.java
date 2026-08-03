@@ -17,7 +17,6 @@
  * under the License.
  */
 package org.apache.bookkeeper.mledger.impl;
-
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Range;
 import io.github.merlimat.slog.Logger;
@@ -29,14 +28,13 @@ import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Set;
 import java.util.concurrent.ConcurrentSkipListMap;
-
 import java.util.function.IntFunction;
 import java.util.function.Supplier;
 import org.apache.bookkeeper.mledger.Position;
 import org.apache.bookkeeper.mledger.PositionFactory;
 import org.apache.bookkeeper.mledger.proto.BatchedEntryDeletionIndexInfo;
-import org.apache.bookkeeper.mledger.proto.MessageRange;
 import org.apache.bookkeeper.mledger.proto.ManagedLedgerInfo.LedgerInfo;
+import org.apache.bookkeeper.mledger.proto.MessageRange;
 import org.apache.bookkeeper.mledger.proto.NestedPositionInfo;
 import org.apache.pulsar.common.util.collections.LongPairRangeSet;
 import org.jspecify.annotations.Nullable;

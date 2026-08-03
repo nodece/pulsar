@@ -547,8 +547,8 @@ public class ManagedLedgerConfig {
         return persistentUnackedRangesWithPerLedgerEntryEnabled;
     }
 
-    public void setPersistentUnackedRangesWithPerLedgerEntryEnabled(boolean persistentUnackedRangesWithPerLedgerEntryEnabled) {
-        this.persistentUnackedRangesWithPerLedgerEntryEnabled = persistentUnackedRangesWithPerLedgerEntryEnabled;
+    public void setPersistentUnackedRangesWithPerLedgerEntryEnabled(boolean enabled) {
+        this.persistentUnackedRangesWithPerLedgerEntryEnabled = enabled;
     }
 
     public int getPersistentUnackedRangesMaxEntrySize() {
