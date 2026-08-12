@@ -2787,6 +2787,13 @@ public class ServiceConfiguration implements PulsarConfiguration {
         doc = "If enabled, the maximum \"acknowledgment holes\" will not be limited and \"acknowledgment holes\" "
                 + "are stored in multiple entries.")
     private boolean persistentUnackedRangesWithMultipleEntriesEnabled = false;
+    @FieldContext(
+        category = CATEGORY_STORAGE_ML,
+        doc = "PIP-488: Enables per-msgLedger cursor checkpoint persistence. When true, the cursor "
+                + "writes a CursorCheckpoint per flush (mark-delete ledger's ack state inline + refs "
+                + "to other ledgers' previously-persisted ack states) instead of the legacy single "
+                + "PositionInfo entry. Eliminates write amplification and avoids ack truncation.")
+    private boolean persistentUnackedRangesWithPerLedgerEntryEnabled = false;
     @Deprecated
     @FieldContext(
         category = CATEGORY_STORAGE_ML,

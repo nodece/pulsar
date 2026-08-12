@@ -22,14 +22,18 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.BoundType;
 import com.google.common.collect.Range;
 import io.github.merlimat.slog.Logger;
+import io.netty.buffer.Unpooled;
 import it.unimi.dsi.fastutil.longs.Long2ObjectRBTreeMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectSortedMap;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.LongConsumer;
 import org.apache.bookkeeper.mledger.Position;
 import org.apache.bookkeeper.mledger.PositionFactory;
 import org.apache.commons.lang3.mutable.MutableInt;
@@ -293,6 +297,18 @@ class PositionRangeSet implements LongPairRangeSet<Position> {
         invalidateCaches();
     }
 
+    void buildFromBitmaps(Map<Long, byte[]> bitmaps) {
+        rangeBitmapMap.clear();
+        resetDirtyKeys();
+        bitmaps.forEach((ledgerId, bytes) -> {
+            if (bytes != null && bytes.length > 0) {
+                rangeBitmapMap.put(ledgerId,
+                        LongBitmaps.deserialize(Unpooled.wrappedBuffer(bytes)));
+            }
+        });
+        invalidateCaches();
+    }
+
     @Override
     public int cardinality(long lowerLedgerId, long lowerEntryId, long upperLedgerId, long upperEntryId) {
         Long2ObjectSortedMap<LongBitmap> subMap = rangeBitmapMap.subMap(lowerLedgerId, upperLedgerId + 1);
@@ -450,18 +466,48 @@ class PositionRangeSet implements LongPairRangeSet<Position> {
         return ledgerId >= 0 && ledgerId <= Integer.MAX_VALUE && dirtyLedgers.contains(ledgerId);
     }
 
+    /**
+     * Atomically snapshots the dirty ledger IDs and clears the dirty set.
+     *
+     * <p>The returned set is consumed by the persistence layer to decide which ledgers
+     * need fresh AckState entries written this flush. Keys above {@code Integer.MAX_VALUE}
+     * are skipped at mark-time, so callers see raw ledger IDs in {@code [0, 2^31-1]}.
+     */
+    Set<Long> snapshotAndClearDirtyLedgers() {
+        Set<Long> snapshot = new HashSet<>();
+        dirtyLedgers.forEachLong(bit -> snapshot.add(bit - 1));
+        dirtyLedgers.clear();
+        return snapshot;
+    }
+
+    void restoreDirtyLedgers(Set<Long> ledgers) {
+        for (long id : ledgers) {
+            if (id >= 0 && id < Integer.MAX_VALUE) {
+                dirtyLedgers.add(id + 1);
+            }
+        }
+    }
+
+    /**
+     * Returns the serialized RoaringBitmap bytes for a specific ledger's individual acks,
+     * or {@code null} when the ledger has no entries in this set.
+     */
+    byte[] bitmapOf(long ledgerId) {
+        LongBitmap bitmap = rangeBitmapMap.get(ledgerId);
+        return bitmap == null ? null : bitmap.serialize();
+    }
+
+    /**
+     * Invokes the given consumer for each ledger ID that currently has at least one
+     * individual-deleted entry in this set. Used by the persistence layer to enumerate
+     * the active ledgers that need an AckState or AckStateRef in the checkpoint.
+     */
+    void forEachActiveLedger(LongConsumer action) {
+        rangeBitmapMap.keySet().forEach(action);
+    }
+
     private void markDirty(long lowerLedgerId, long upperLedgerId) {
-        // Original semantics: dirtyLedgers.addOpenClosed(k1, 0, k2, 0), which in LongPair ordering
-        // is (k1, k2] on ledger ids. LongBitmap.add(from, to) is half-open [from, to), so shift both
-        // bounds. Same-ledger or inverted range is a no-op.
-        //
-        // Note: Ledger IDs are 64-bit longs, but LongBitmap supports unsigned 32-bit range [0, 2^32-1].
-        // In practice, BookKeeper ledger IDs rarely exceed Integer.MAX_VALUE. If upperLedgerId exceeds
-        // this limit, we skip tracking to avoid overflow. This is acceptable because:
-        // 1. The dirty tracker is an optimization hint for selective persistence
-        // 2. Missing a dirty mark means conservative full-ledger write (safe, just slower)
-        // 3. Real-world ledger IDs stay well within 32-bit range
-        if (upperLedgerId <= lowerLedgerId || lowerLedgerId < 0) {
+        if (upperLedgerId < lowerLedgerId || lowerLedgerId < 0) {
             return;
         }
         if (lowerLedgerId >= Integer.MAX_VALUE || upperLedgerId > Integer.MAX_VALUE) {
@@ -471,7 +517,7 @@ class PositionRangeSet implements LongPairRangeSet<Position> {
                     .log("Skipping dirty tracking for ledger ID at/exceeding Integer.MAX_VALUE");
             return;
         }
-        dirtyLedgers.add(lowerLedgerId + 1, upperLedgerId + 1);
+        dirtyLedgers.add(lowerLedgerId + 1, upperLedgerId + 2);
     }
 
     private boolean isValid(long ledgerId, long entryId) {
