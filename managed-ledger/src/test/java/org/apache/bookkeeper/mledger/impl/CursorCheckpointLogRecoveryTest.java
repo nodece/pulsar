@@ -120,7 +120,7 @@ public class CursorCheckpointLogRecoveryTest extends MockedBookKeeperTestCase {
     }
 
     /**
-     * Scenario: only incomplete chunks → scanBack exhausts → error
+     * Scenario: only incomplete chunks, scanBack exhausts, error.
      */
     @Test(timeOut = 30000)
     public void testScanBackExhausts() throws Exception {
@@ -313,5 +313,36 @@ public class CursorCheckpointLogRecoveryTest extends MockedBookKeeperTestCase {
         CursorCheckpointLog.RecoveredState state = writer.readLatest(lh).get(5, TimeUnit.SECONDS);
         assertThat(state.isLegacy()).isFalse();
         assertThat(state.checkpoint.getMarkDeleteLedgerId()).isEqualTo(80L);
+    }
+
+    /**
+     * Scenario: readAt on the last part of a chunked checkpoint returns the assembled checkpoint,
+     * while readAt on a non-terminal part fails fast (ref targets must not scan back).
+     */
+    @Test(timeOut = 30000)
+    public void testReadAtAssemblesChunkAndFailsOnNonTerminalPart() throws Exception {
+        LedgerHandle lh = createLedger();
+        CursorCheckpointLog writer = new CursorCheckpointLog(5 * 1024 * 1024);
+
+        byte[] cpBytes = makeCheckpoint(90, 21).toByteArray();
+        int half = cpBytes.length / 2;
+        byte[] part0 = new byte[half];
+        byte[] part1 = new byte[cpBytes.length - half];
+        System.arraycopy(cpBytes, 0, part0, 0, half);
+        System.arraycopy(cpBytes, half, part1, 0, part1.length);
+        long firstEntry = appendRaw(lh, wrapChunkPart(0, 2, part0));
+        long lastEntry = appendRaw(lh, wrapChunkPart(1, 2, part1));
+
+        CursorCheckpointLog.RecoveredState state = writer.readAt(lh, lastEntry).get(5, TimeUnit.SECONDS);
+        assertThat(state.isLegacy()).isFalse();
+        assertThat(state.checkpoint.getMarkDeleteLedgerId()).isEqualTo(90L);
+        assertThat(state.commitEntryId).isEqualTo(lastEntry);
+
+        try {
+            writer.readAt(lh, firstEntry).get(5, TimeUnit.SECONDS);
+            assertThat(false).as("Should have failed on a non-terminal chunk part").isTrue();
+        } catch (Exception e) {
+            assertThat(e).hasCauseInstanceOf(ManagedLedgerException.class);
+        }
     }
 }

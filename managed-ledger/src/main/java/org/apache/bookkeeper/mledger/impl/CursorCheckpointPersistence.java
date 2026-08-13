@@ -18,17 +18,19 @@
  */
 package org.apache.bookkeeper.mledger.impl;
 
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.locks.ReadWriteLock;
-import java.util.function.BiConsumer;
 import lombok.CustomLog;
+import lombok.Getter;
 import org.apache.bookkeeper.client.BKException;
 import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.client.LedgerHandle;
@@ -39,39 +41,34 @@ import org.apache.bookkeeper.mledger.proto.AckState;
 import org.apache.bookkeeper.mledger.proto.AckStateRef;
 import org.apache.bookkeeper.mledger.proto.BatchedEntryDeletionIndexInfo;
 import org.apache.bookkeeper.mledger.proto.CursorCheckpoint;
-import org.apache.bookkeeper.mledger.proto.CursorLogEntry;
 
 @CustomLog
-public class CursorCheckpointPersistence {
+class CursorCheckpointPersistence {
 
     private final CursorCheckpointLog writer;
     private final ReadWriteLock lock;
-    private final BiConsumer<Long, Long> checkpointAckedCallback;
     private final BookKeeper bookKeeper;
     private final BookKeeper.DigestType digestType;
     private final byte[] password;
+    @Getter
     private final boolean perLedgerEntryPersistEnabled;
 
-    private final Map<Long, Position> lastAppendedPos = new HashMap<>();
+    // Position of each msg ledger's latest checkpoint in the cursor ledger; the AckStateRef
+    // targets are derived from this index.
+    private final Long2ObjectOpenHashMap<Position> lastCheckpointPos = new Long2ObjectOpenHashMap<>();
     private volatile CompletableFuture<CursorCheckpointLog.AppendResult> lastPersist =
             CompletableFuture.completedFuture(null);
 
     public CursorCheckpointPersistence(CursorCheckpointLog writer, ReadWriteLock lock,
-                                         BiConsumer<Long, Long> checkpointAckedCallback,
                                          BookKeeper bookKeeper,
                                          BookKeeper.DigestType digestType, byte[] password,
                                          boolean perLedgerEntryPersistEnabled) {
         this.writer = writer;
         this.lock = lock;
-        this.checkpointAckedCallback = checkpointAckedCallback;
         this.bookKeeper = bookKeeper;
         this.digestType = digestType;
         this.password = password;
         this.perLedgerEntryPersistEnabled = perLedgerEntryPersistEnabled;
-    }
-
-    public boolean isPerLedgerEntryPersistEnabled() {
-        return perLedgerEntryPersistEnabled;
     }
 
     public void setZkCheckpointHint(long cursorLedgerId, long entryId) {
@@ -87,54 +84,128 @@ public class CursorCheckpointPersistence {
         return lastPersist;
     }
 
-    private CompletableFuture<CursorCheckpointLog.AppendResult> doPersist(
-            LedgerHandle lh, Position mdPos, Map<String, Long> properties,
-            ManagedCursorImpl cursor) {
-
-        final long mdLedgerId = mdPos.getLedgerId();
-        final Set<Long> dirtyLedgers;
-        final Map<Long, byte[]> dirtyBitmaps = new HashMap<>();
-        final Map<Long, List<BatchedEntryDeletionIndexInfo>> dirtyBatchAcks = new HashMap<>();
+    /**
+     * Immutable snapshot of cursor state for one flush. Building reads only from this snapshot,
+     * not live cursor state, so acks arriving during async appends don't wedge the flush.
+     */
+    private static final class PersistContext {
+        final long mdLedgerId;
+        // Ledgers whose checkpoint is written by this flush (dirty + self-healed positionless
+        // active ledgers), excluding the mark-delete ledger.
+        final Set<Long> flushedLedgers;
+        // Ledgers that may be referenced by this flush's checkpoints.
+        final Set<Long> activeLedgers;
+        final Map<Long, byte[]> dirtyBitmaps;
+        final Map<Long, List<BatchedEntryDeletionIndexInfo>> dirtyBatchAcks;
         final byte[] mdBitmap;
         final List<BatchedEntryDeletionIndexInfo> mdBatchAcks;
 
+        PersistContext(long mdLedgerId, Set<Long> flushedLedgers, Set<Long> activeLedgers,
+                       Map<Long, byte[]> dirtyBitmaps,
+                       Map<Long, List<BatchedEntryDeletionIndexInfo>> dirtyBatchAcks,
+                       byte[] mdBitmap, List<BatchedEntryDeletionIndexInfo> mdBatchAcks) {
+            this.mdLedgerId = mdLedgerId;
+            this.flushedLedgers = flushedLedgers;
+            this.activeLedgers = activeLedgers;
+            this.dirtyBitmaps = dirtyBitmaps;
+            this.dirtyBatchAcks = dirtyBatchAcks;
+            this.mdBitmap = mdBitmap;
+            this.mdBatchAcks = mdBatchAcks;
+        }
+    }
+
+    private PersistContext createPersistContext(ManagedCursorImpl cursor, Position mdPos) {
         lock.readLock().lock();
         try {
-            dirtyLedgers = cursor.individualDeletedMessages.snapshotAndClearDirtyLedgers();
-            dirtyLedgers.remove(mdLedgerId);
-            for (long id : dirtyLedgers) {
-                dirtyBitmaps.put(id, cursor.individualDeletedMessages.bitmapOf(id));
-                dirtyBatchAcks.put(id, filterBatchAcksForLedger(cursor, id));
+            long mdLedgerId = mdPos.getLedgerId();
+            Set<Long> clearedDirtyLedgers = cursor.individualDeletedMessages.snapshotAndClearDirtyLedgers();
+            Set<Long> flushedLedgers = new HashSet<>(clearedDirtyLedgers);
+            flushedLedgers.remove(mdLedgerId);
+
+            Set<Long> activeLedgers = new HashSet<>();
+            cursor.individualDeletedMessages.forEachActiveLedger(activeLedgers::add);
+            Map<Long, List<BatchedEntryDeletionIndexInfo>> batchAcksByLedger = groupBatchAcksByLedger(cursor);
+            batchAcksByLedger.keySet().forEach(activeLedgers::add);
+
+            // Self-heal: active ledgers without a persisted checkpoint are flushed this round,
+            // otherwise they'd have no position to reference.
+            for (long id : activeLedgers) {
+                if (id != mdLedgerId && !lastCheckpointPos.containsKey(id)) {
+                    flushedLedgers.add(id);
+                }
             }
-            mdBitmap = cursor.individualDeletedMessages.bitmapOf(mdLedgerId);
-            mdBatchAcks = filterBatchAcksForLedger(cursor, mdLedgerId);
+
+            Map<Long, byte[]> dirtyBitmaps = new HashMap<>();
+            Map<Long, List<BatchedEntryDeletionIndexInfo>> dirtyBatchAcks = new HashMap<>();
+            for (long id : flushedLedgers) {
+                dirtyBitmaps.put(id, cursor.individualDeletedMessages.bitmapOf(id));
+                dirtyBatchAcks.put(id, batchAcksByLedger.getOrDefault(id, Collections.emptyList()));
+            }
+            byte[] mdBitmap = cursor.individualDeletedMessages.bitmapOf(mdLedgerId);
+            List<BatchedEntryDeletionIndexInfo> mdBatchAcks =
+                    batchAcksByLedger.getOrDefault(mdLedgerId, Collections.emptyList());
+            return new PersistContext(mdLedgerId, flushedLedgers, activeLedgers, dirtyBitmaps,
+                    dirtyBatchAcks, mdBitmap, mdBatchAcks);
         } finally {
             lock.readLock().unlock();
         }
+    }
 
-        List<Long> dirtyOrder = new ArrayList<>(dirtyLedgers);
+    private static Map<Long, List<BatchedEntryDeletionIndexInfo>> groupBatchAcksByLedger(
+            ManagedCursorImpl cursor) {
+        Map<Long, List<BatchedEntryDeletionIndexInfo>> result = new HashMap<>();
+        if (cursor.batchDeletedIndexes == null) {
+            return result;
+        }
+        cursor.batchDeletedIndexes.forEach((position, bitSet) -> {
+            List<BatchedEntryDeletionIndexInfo> list =
+                    result.computeIfAbsent(position.getLedgerId(), k -> new ArrayList<>());
+            BatchedEntryDeletionIndexInfo info = new BatchedEntryDeletionIndexInfo();
+            info.setPosition().setLedgerId(position.getLedgerId())
+                    .setEntryId(position.getEntryId());
+            bitSet.stream().forEach(info::addDeleteSet);
+            list.add(info);
+        });
+        return result;
+    }
+
+    private CompletableFuture<CursorCheckpointLog.AppendResult> doPersist(
+            LedgerHandle lh, Position mdPos, Map<String, Long> properties,
+            ManagedCursorImpl cursor) {
+        PersistContext ctx = createPersistContext(cursor, mdPos);
+
+        // Drop positions for ledgers below mark-delete that are no longer active. Active ledgers
+        // are kept: batch-index entries may still be in memory before the align cleanup runs.
+        lock.writeLock().lock();
+        try {
+            lastCheckpointPos.keySet().removeIf(id -> id < ctx.mdLedgerId && !ctx.activeLedgers.contains(id));
+        } finally {
+            lock.writeLock().unlock();
+        }
+
+        List<Long> dirtyOrder = new ArrayList<>(ctx.flushedLedgers);
         Collections.sort(dirtyOrder);
-        List<Long> writeOrder = new ArrayList<>(dirtyOrder);
-        writeOrder.add(mdLedgerId);
+        // mdLedger is written first so other checkpoints in this flush can reference its position.
+        List<Long> writeOrder = new ArrayList<>(dirtyOrder.size() + 1);
+        writeOrder.add(ctx.mdLedgerId);
+        writeOrder.addAll(dirtyOrder);
 
-        final Map<Long, Position> prevPositions = new HashMap<>();
+        final Set<Long> appendedLedgers = new HashSet<>();
         CompletableFuture<CursorCheckpointLog.AppendResult> chain =
                 CompletableFuture.completedFuture(null);
         for (long ledgerId : writeOrder) {
             chain = chain.thenCompose(ignored -> {
-                byte[] bitmap = ledgerId == mdLedgerId ? mdBitmap : dirtyBitmaps.get(ledgerId);
+                byte[] bitmap = ledgerId == ctx.mdLedgerId ? ctx.mdBitmap : ctx.dirtyBitmaps.get(ledgerId);
                 List<BatchedEntryDeletionIndexInfo> batchAcks =
-                        ledgerId == mdLedgerId ? mdBatchAcks : dirtyBatchAcks.get(ledgerId);
-                CursorCheckpoint checkpoint = buildCheckpoint(ledgerId, bitmap, batchAcks,
-                        mdPos, properties, cursor, dirtyLedgers);
+                        ledgerId == ctx.mdLedgerId ? ctx.mdBatchAcks : ctx.dirtyBatchAcks.get(ledgerId);
+                CursorCheckpoint checkpoint = buildCheckpoint(ctx, ledgerId, bitmap, batchAcks,
+                        mdPos, properties);
                 return writer.appendCheckpoint(lh, checkpoint).thenApply(result -> {
                     lock.writeLock().lock();
                     try {
                         Position persistedPos = PositionFactory.create(lh.getId(), result.commitEntryId());
-                        Position prev = lastAppendedPos.put(ledgerId, persistedPos);
-                        if (prev != null && !prevPositions.containsKey(ledgerId)) {
-                            prevPositions.put(ledgerId, prev);
-                        }
+                        lastCheckpointPos.put(ledgerId, persistedPos);
+                        appendedLedgers.add(ledgerId);
                     } finally {
                         lock.writeLock().unlock();
                     }
@@ -143,29 +214,31 @@ public class CursorCheckpointPersistence {
             });
         }
 
-        return chain.thenApply(result -> {
-            if (checkpointAckedCallback != null) {
-                checkpointAckedCallback.accept(lh.getId(), result.commitEntryId());
-            }
-            return result;
-        }).exceptionally(error -> {
-            lock.writeLock().lock();
-            try {
-                cursor.individualDeletedMessages.restoreDirtyLedgers(dirtyLedgers);
-                for (long ledgerId : writeOrder) {
-                    Position prev = prevPositions.get(ledgerId);
-                    if (prev != null) {
-                        lastAppendedPos.put(ledgerId, prev);
-                    } else {
-                        lastAppendedPos.remove(ledgerId);
-                    }
-                }
-            } finally {
-                lock.writeLock().unlock();
-            }
+        return chain.exceptionally(error -> {
+            restoreDirtyForFailedLedgers(cursor, ctx.flushedLedgers, appendedLedgers);
             throw new CompletionException(error);
         });
     }
+
+    /**
+     * Re-marks dirty for ledgers whose checkpoint was not appended, so the next flush retries them.
+     */
+    private void restoreDirtyForFailedLedgers(ManagedCursorImpl cursor, Set<Long> flushedLedgers,
+                                              Set<Long> appendedLedgers) {
+        Set<Long> failedLedgers = new HashSet<>(flushedLedgers);
+        failedLedgers.removeAll(appendedLedgers);
+        if (failedLedgers.isEmpty()) {
+            return;
+        }
+        lock.writeLock().lock();
+        try {
+            cursor.individualDeletedMessages.restoreDirtyLedgers(failedLedgers);
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    // ============================ recover ============================
 
     public CompletableFuture<RecoveredCheckpoint> recover(LedgerHandle lh) {
         return writer.readLatest(lh).thenCompose(state -> {
@@ -173,16 +246,54 @@ public class CursorCheckpointPersistence {
                 return CompletableFuture.completedFuture(RecoveredCheckpoint.legacy(state.legacyBytes));
             }
             CursorCheckpoint cp = state.checkpoint;
-            int expectedCount = 1 + cp.getAckStateRefsCount();
-            return fetchAckStateRefs(cp).thenApply(fetched -> {
-                if (fetched.size() != expectedCount) {
-                    throw new RuntimeException(new ManagedLedgerException(
-                            "Recovery inconsistency: expected " + expectedCount + " ack states, got "
-                                    + fetched.size()));
-                }
+            return fetchAckStateRefs(cp, lh).thenApply(fetched -> {
+                validateRecoveredAckData(cp, fetched);
+                rebuildLastCheckpointPos(lh, state.commitEntryId, cp);
                 return RecoveredCheckpoint.of(cp, fetched);
             });
         });
+    }
+
+    /** Validates no duplicate msgLedgerIds and that all refs resolved. Fails fast on corruption. */
+    private static void validateRecoveredAckData(CursorCheckpoint cp, Map<Long, AckStateData> fetched) {
+        Set<Long> expected = new HashSet<>(cp.getAckStatesCount() + cp.getAckStateRefsCount());
+        for (AckState ackState : cp.getAckStatesList()) {
+            if (!expected.add(ackState.getMsgLedgerId())) {
+                throw new RuntimeException(new ManagedLedgerException(
+                        "Recovery inconsistency: duplicate msgLedgerId " + ackState.getMsgLedgerId()
+                                + " in inline ack states"));
+            }
+        }
+        for (AckStateRef ref : cp.getAckStateRefsList()) {
+            if (!expected.add(ref.getMsgLedgerId())) {
+                throw new RuntimeException(new ManagedLedgerException(
+                        "Recovery inconsistency: msgLedgerId " + ref.getMsgLedgerId()
+                                + " appears both inline and in ack state refs"));
+            }
+        }
+        if (!fetched.keySet().equals(expected)) {
+            throw new RuntimeException(new ManagedLedgerException(
+                    "Recovery inconsistency: expected ack states for " + expected
+                            + ", got " + fetched.keySet()));
+        }
+    }
+
+    /** Rebuilds lastCheckpointPos from the recovered checkpoint so the first persist can emit refs. */
+    private void rebuildLastCheckpointPos(LedgerHandle lh, long commitEntryId, CursorCheckpoint cp) {
+        lock.writeLock().lock();
+        try {
+            lastCheckpointPos.clear();
+            Position inlinePos = PositionFactory.create(lh.getId(), commitEntryId);
+            for (AckState ackState : cp.getAckStatesList()) {
+                lastCheckpointPos.put(ackState.getMsgLedgerId(), inlinePos);
+            }
+            for (AckStateRef ref : cp.getAckStateRefsList()) {
+                lastCheckpointPos.put(ref.getMsgLedgerId(),
+                        PositionFactory.create(ref.getCursorLedgerId(), ref.getEntryId()));
+            }
+        } finally {
+            lock.writeLock().unlock();
+        }
     }
 
     public CompletableFuture<RecoveredCheckpoint> recoverWithHint(
@@ -193,112 +304,97 @@ public class CursorCheckpointPersistence {
         return recover(lh);
     }
 
-    private CompletableFuture<Map<Long, AckStateData>> fetchAckStateRefs(CursorCheckpoint cp) {
+    private CompletableFuture<Map<Long, AckStateData>> fetchAckStateRefs(CursorCheckpoint cp, LedgerHandle lh) {
         Map<Long, AckStateData> result = new HashMap<>();
-        if (cp.getAckStatesCount() != 1) {
-            throw new RuntimeException(new ManagedLedgerException(
-                    "CursorCheckpoint must contain exactly one inline AckState, got "
-                            + cp.getAckStatesCount()));
+        for (AckState ackState : cp.getAckStatesList()) {
+            result.put(ackState.getMsgLedgerId(), toAckStateData(ackState));
         }
-        AckState primary = cp.getAckStateAt(0);
-        result.put(primary.getMsgLedgerId(),
-                new AckStateData(extractBitmap(primary),
-                        primary.getBatchAcksList() != null
-                                ? primary.getBatchAcksList() : Collections.emptyList()));
-
         List<AckStateRef> refs = cp.getAckStateRefsList();
         if (refs.isEmpty()) {
             return CompletableFuture.completedFuture(result);
         }
-
-        List<CompletableFuture<Void>> fetches = new ArrayList<>();
+        List<CompletableFuture<AckStateData>> fetches = new ArrayList<>(refs.size());
         for (AckStateRef ref : refs) {
-            fetches.add(fetchAckState(ref).thenAccept(ackData -> {
-                synchronized (result) {
-                    result.put(ref.getMsgLedgerId(), ackData);
-                }
-            }));
+            fetches.add(fetchAckState(ref, lh));
         }
         return CompletableFuture.allOf(fetches.toArray(new CompletableFuture[0]))
-                .thenApply(ignored -> result);
+                .thenApply(ignored -> {
+                    for (int i = 0; i < refs.size(); i++) {
+                        result.put(refs.get(i).getMsgLedgerId(), fetches.get(i).join());
+                    }
+                    return result;
+                });
     }
 
-    private CompletableFuture<AckStateData> fetchAckState(AckStateRef ref) {
-        return readEntryFromLedger(ref.getCursorLedgerId(), ref.getEntryId()).thenApply(bytes -> {
-            CursorLogEntry env = new CursorLogEntry();
-            try {
-                env.parseFrom(bytes);
-            } catch (Exception e) {
-                throw new RuntimeException(new ManagedLedgerException(
-                        "AckStateRef parse failure for " + ref, e));
-            }
-            if (!env.hasCheckpoint()) {
-                throw new RuntimeException(new ManagedLedgerException(
-                        "AckStateRef target " + ref + " is not a checkpoint entry"));
-            }
-            CursorCheckpoint cp = env.getCheckpoint();
-            if (cp.getAckStatesCount() != 1) {
-                throw new RuntimeException(new ManagedLedgerException(
-                        "AckStateRef target " + ref + " is not a single-ack checkpoint"));
-            }
-            AckState ackState = cp.getAckStateAt(0);
+    private CompletableFuture<AckStateData> fetchAckState(AckStateRef ref, LedgerHandle lh) {
+        return readCheckpointFromLedger(lh, ref.getCursorLedgerId(), ref.getEntryId())
+                .thenApply(cp -> extractAckState(cp, ref));
+    }
+
+    private static AckStateData extractAckState(CursorCheckpoint cp, AckStateRef ref) {
+        for (AckState ackState : cp.getAckStatesList()) {
             if (ackState.getMsgLedgerId() == ref.getMsgLedgerId()) {
-                return new AckStateData(extractBitmap(ackState),
-                        ackState.getBatchAcksList() != null
-                                ? ackState.getBatchAcksList() : Collections.emptyList());
+                return toAckStateData(ackState);
             }
-            throw new RuntimeException(new ManagedLedgerException(
-                    "AckStateRef target " + ref + " does not contain msgLedgerId "
-                            + ref.getMsgLedgerId()));
-        });
+        }
+        throw new RuntimeException(new ManagedLedgerException(
+                "AckStateRef target " + ref + " does not contain msgLedgerId "
+                        + ref.getMsgLedgerId()));
     }
 
-    private CompletableFuture<byte[]> readEntryFromLedger(long ledgerId, long entryId) {
-        CompletableFuture<byte[]> future = new CompletableFuture<>();
+    private static AckStateData toAckStateData(AckState ackState) {
+        return new AckStateData(
+                ackState.hasAckBitmap() ? ackState.getAckBitmap() : null,
+                ackState.getBatchAcksList() != null
+                        ? ackState.getBatchAcksList() : Collections.emptyList());
+    }
+
+    private CompletableFuture<CursorCheckpoint> readCheckpointFromLedger(
+            LedgerHandle lh, long ledgerId, long entryId) {
+        CompletableFuture<CursorCheckpoint> future = new CompletableFuture<>();
+        if (ledgerId == lh.getId()) {
+            // Refs into the recovered cursor ledger itself can reuse the already-open handle.
+            writer.readAt(lh, entryId)
+                    .whenComplete((state, error) -> completeCheckpointRead(future, ledgerId, entryId, state, error));
+            return future;
+        }
         bookKeeper.asyncOpenLedgerNoRecovery(ledgerId, digestType, password, (rc, handle, ctx) -> {
             if (rc != BKException.Code.OK) {
                 future.completeExceptionally(BKException.create(rc));
                 return;
             }
-            handle.asyncReadEntries(entryId, entryId, (rc2, lh, entries, ctx2) -> {
-                lh.asyncClose((closeRc, closeHandle, closeCtx) -> {}, null);
-                if (rc2 != BKException.Code.OK) {
-                    future.completeExceptionally(BKException.create(rc2));
-                    return;
-                }
-                if (!entries.hasMoreElements()) {
-                    future.completeExceptionally(new ManagedLedgerException(
-                            "Empty read for entry " + entryId + " in ledger " + ledgerId));
-                    return;
-                }
-                future.complete(entries.nextElement().getEntry());
-            }, null);
+            writer.readAt(handle, entryId).whenComplete((state, error) -> {
+                handle.asyncClose((closeRc, closeHandle, closeCtx) -> {}, null);
+                completeCheckpointRead(future, ledgerId, entryId, state, error);
+            });
         }, null);
         return future;
     }
 
-    private static List<BatchedEntryDeletionIndexInfo> filterBatchAcksForLedger(
-            ManagedCursorImpl cursor, long msgLedgerId) {
-        if (cursor.batchDeletedIndexes == null || cursor.batchDeletedIndexes.isEmpty()) {
-            return Collections.emptyList();
+    private static void completeCheckpointRead(CompletableFuture<CursorCheckpoint> future, long ledgerId,
+                                               long entryId, CursorCheckpointLog.RecoveredState state,
+                                               Throwable error) {
+        if (error != null) {
+            future.completeExceptionally(error);
+        } else if (state.isLegacy()) {
+            future.completeExceptionally(new ManagedLedgerException(
+                    "AckStateRef target entry " + entryId + " in ledger " + ledgerId
+                            + " is not a checkpoint"));
+        } else {
+            future.complete(state.checkpoint);
         }
-        List<BatchedEntryDeletionIndexInfo> result = new ArrayList<>();
-        cursor.batchDeletedIndexes.forEach((position, bitSet) -> {
-            if (position.getLedgerId() == msgLedgerId) {
-                BatchedEntryDeletionIndexInfo info = new BatchedEntryDeletionIndexInfo();
-                info.setPosition().setLedgerId(position.getLedgerId())
-                        .setEntryId(position.getEntryId());
-                bitSet.stream().forEach(info::addDeleteSet);
-                result.add(info);
-            }
-        });
-        return result;
     }
 
-    private CursorCheckpoint buildCheckpoint(long msgLedgerId, byte[] bitmap,
+    // ============================ checkpoint builder ============================
+
+    /**
+     * Builds a checkpoint for one msg ledger: inline ack state plus refs to every other active
+     * ledger's latest position. Refs stay valid because cursor ledgers are only GC'd once
+     * mark-delete passes the last ledger holding acks.
+     */
+    private CursorCheckpoint buildCheckpoint(PersistContext ctx, long msgLedgerId, byte[] bitmap,
                                              List<BatchedEntryDeletionIndexInfo> batchAcks,
-                                             Position mdPos, Map<String, Long> properties,
-                                             ManagedCursorImpl cursor, Set<Long> dirtyLedgers) {
+                                             Position mdPos, Map<String, Long> properties) {
         CursorCheckpoint cp = new CursorCheckpoint()
                 .setMarkDeleteLedgerId(mdPos.getLedgerId())
                 .setMarkDeleteEntryId(mdPos.getEntryId());
@@ -311,22 +407,22 @@ public class CursorCheckpointPersistence {
         addAckState(cp, msgLedgerId, bitmap, batchAcks);
         lock.readLock().lock();
         try {
-            cursor.individualDeletedMessages.forEachActiveLedger(id -> {
+            for (long id : ctx.activeLedgers) {
                 if (id != msgLedgerId) {
-                    Position pos = lastAppendedPos.get(id);
+                    Position pos = lastCheckpointPos.get(id);
                     if (pos == null) {
-                        if (dirtyLedgers.contains(id)) {
-                            return;
+                        if (ctx.flushedLedgers.contains(id)) {
+                            continue;
                         }
                         throw new IllegalStateException(
-                                "Missing lastAppendedPos for active msgLedgerId " + id);
+                                "Missing lastCheckpointPos for active msgLedgerId " + id);
                     }
                     AckStateRef ref = cp.addAckStateRef();
                     ref.setMsgLedgerId(id)
                             .setCursorLedgerId(pos.getLedgerId())
                             .setEntryId(pos.getEntryId());
                 }
-            });
+            }
         } finally {
             lock.readLock().unlock();
         }
@@ -344,36 +440,19 @@ public class CursorCheckpointPersistence {
         }
     }
 
-    private static byte[] extractBitmap(AckState ackState) {
-        return ackState.hasAckBitmap() ? ackState.getAckBitmap() : null;
-    }
+    // ============================ DTOs ============================
 
-    record AckStateData(byte[] ackBitmap, List<BatchedEntryDeletionIndexInfo> batchAcks) {
-    }
+    record AckStateData(byte[] ackBitmap, List<BatchedEntryDeletionIndexInfo> batchAcks) {}
 
-    static final class RecoveredCheckpoint {
-        final CursorCheckpoint checkpoint;
-        final Map<Long, AckStateData> ackData;
-        final byte[] legacyBytes;
-
-        private RecoveredCheckpoint(CursorCheckpoint checkpoint, Map<Long, AckStateData> ackData) {
-            this.checkpoint = checkpoint;
-            this.ackData = ackData;
-            this.legacyBytes = null;
-        }
-
-        private RecoveredCheckpoint(byte[] legacyBytes) {
-            this.checkpoint = null;
-            this.ackData = null;
-            this.legacyBytes = legacyBytes;
-        }
-
+    record RecoveredCheckpoint(CursorCheckpoint checkpoint,
+                                Map<Long, AckStateData> ackData,
+                                byte[] legacyBytes) {
         static RecoveredCheckpoint of(CursorCheckpoint cp, Map<Long, AckStateData> ackData) {
-            return new RecoveredCheckpoint(cp, ackData);
+            return new RecoveredCheckpoint(cp, ackData, null);
         }
 
         static RecoveredCheckpoint legacy(byte[] bytes) {
-            return new RecoveredCheckpoint(bytes);
+            return new RecoveredCheckpoint(null, null, bytes);
         }
 
         boolean isLegacy() {

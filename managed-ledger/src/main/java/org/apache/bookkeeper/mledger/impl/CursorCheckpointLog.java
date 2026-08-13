@@ -108,21 +108,47 @@ class CursorCheckpointLog {
                     "Cursor ledger " + lh.getId() + " has no entries"));
         }
         log.debug().attr("ledgerId", lh.getId()).attr("lastEntryId", last).log("Recovering checkpoint");
-        return readEntry(lh, last)
-                .thenCompose(bytes -> recoverEntry(lh, last, bytes)
-                        .exceptionally(error -> {
-                            log.warn().attr("ledgerId", lh.getId()).attr("entryId", last)
-                                    .exception(error).log("Failed to recover entry");
-                            return RecoveryDecision.scanBack();
-                        }))
-                .thenCompose(decision -> {
-                    if (decision.shouldScanBack) {
-                        log.info().attr("ledgerId", lh.getId()).attr("entryId", last)
-                                .log("Scanning back for last complete checkpoint");
-                        return scanBack(lh, last);
-                    }
-                    return CompletableFuture.completedFuture(decision.state);
-                });
+        return recoverEntryAt(lh, last, true).thenCompose(decision -> {
+            if (decision.shouldScanBack) {
+                log.info().attr("ledgerId", lh.getId()).attr("entryId", last)
+                        .log("Scanning back for last complete checkpoint");
+                return scanBack(lh, last);
+            }
+            return CompletableFuture.completedFuture(decision.state);
+        });
+    }
+
+    /**
+     * Recovers the checkpoint stored at a specific entry, assembling chunked checkpoints when
+     * needed. Unlike {@link #readLatest}, this never scans back: the target of an ack state ref
+     * must be a complete checkpoint at exactly the given entry, so anything else fails fast.
+     */
+    CompletableFuture<RecoveredState> readAt(LedgerHandle lh, long entryId) {
+        return recoverEntryAt(lh, entryId, false).thenCompose(decision -> {
+            if (decision.shouldScanBack) {
+                return FutureUtil.failedFuture(new ManagedLedgerException(
+                        "No complete checkpoint at entry " + entryId + " in ledger " + lh.getId()));
+            }
+            return CompletableFuture.completedFuture(decision.state);
+        });
+    }
+
+    /**
+     * Reads and decodes the entry at {@code entryId}. When {@code fallbackToScanBack} is set,
+     * decode failures yield a scan-back decision (used by the tail/scan-back paths); otherwise they
+     * propagate to the caller.
+     */
+    private CompletableFuture<RecoveryDecision> recoverEntryAt(LedgerHandle lh, long entryId,
+                                                               boolean fallbackToScanBack) {
+        CompletableFuture<RecoveryDecision> recovered = readEntry(lh, entryId)
+                .thenCompose(bytes -> recoverEntry(lh, entryId, bytes));
+        return fallbackToScanBack
+                ? recovered.exceptionally(error -> {
+                    log.warn().attr("ledgerId", lh.getId()).attr("entryId", entryId)
+                            .exception(error).log("Failed to recover entry");
+                    return RecoveryDecision.scanBack();
+                })
+                : recovered;
     }
 
     private CompletableFuture<RecoveryDecision> recoverEntry(LedgerHandle lh, long entryId, byte[] bytes) {
@@ -258,8 +284,7 @@ class CursorCheckpointLog {
             log.debug().attr("ledgerId", lh.getId()).attr("hintEntryId", zkCheckpointEntryId)
                     .attr("fromEntryId", fromEntryId)
                     .log("Trying ZK checkpoint hint before scan-back");
-            hintFuture = readEntry(lh, zkCheckpointEntryId)
-                    .thenCompose(bytes -> recoverEntry(lh, zkCheckpointEntryId, bytes))
+            hintFuture = recoverEntryAt(lh, zkCheckpointEntryId, false)
                     .thenCompose(decision -> decision.shouldScanBack
                             ? scanBackStep(lh, fromEntryId - 1)
                             : CompletableFuture.completedFuture(decision.state));
@@ -284,13 +309,7 @@ class CursorCheckpointLog {
             return FutureUtil.failedFuture(new ManagedLedgerException(
                     "scanBack exhausted without finding a complete checkpoint"));
         }
-        return readEntry(lh, entryId)
-                .thenCompose(bytes -> recoverEntry(lh, entryId, bytes)
-                        .exceptionally(error -> {
-                            log.warn().attr("ledgerId", lh.getId()).attr("entryId", entryId)
-                                    .exception(error).log("Failed to recover scan-back entry, continue scanning");
-                            return RecoveryDecision.scanBack();
-                        }))
+        return recoverEntryAt(lh, entryId, true)
                 .thenCompose(decision -> decision.shouldScanBack
                         ? scanBackStep(lh, entryId - 1)
                         : CompletableFuture.completedFuture(decision.state));

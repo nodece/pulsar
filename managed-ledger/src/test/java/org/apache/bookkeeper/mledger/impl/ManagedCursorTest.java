@@ -7161,89 +7161,6 @@ public class ManagedCursorTest extends MockedBookKeeperTestCase {
     }
 
     /**
-     * Regression: verifies that the markDirty off-by-one fix is correct — a cross-ledger
-     * range markDirty(L1, L2) marks ALL ledgers from L1 through L2 inclusive as dirty.
-     * Before the fix, the upper ledger (L2) was silently dropped.
-     */
-    @Test(timeOut = 30000)
-    public void testCheckpointCrossLedgerRangeAllDirty() throws Exception {
-        ManagedLedgerConfig config = new ManagedLedgerConfig();
-        config.setPersistentUnackedRangesWithPerLedgerEntryEnabled(true);
-        config.setMaxEntriesPerLedger(3); // small → many msgLedgers
-        config.setMaxUnackedRangesToPersistInMetadataStore(-1);
-        config.setThrottleMarkDelete(0);
-
-        String ledgerName = "test_cross_ledger_range_dirty";
-        ManagedLedger ledger = factory.open(ledgerName, config);
-        ManagedCursorImpl cursor = (ManagedCursorImpl) ledger.openCursor("c1");
-
-        List<Position> positions = new ArrayList<>();
-        for (int i = 0; i < 12; i++) {
-            positions.add(ledger.addEntry(("m-" + i).getBytes(Encoding)));
-        }
-        // Ack one entry in each of the 4 msgLedgers (3 entries/ledger → 4 ledgers)
-        cursor.markDelete(positions.get(0));
-        cursor.delete(positions.get(1));   // ledger A
-        cursor.delete(positions.get(4));   // ledger B
-        cursor.delete(positions.get(7));   // ledger C
-        cursor.delete(positions.get(10));  // ledger D
-
-        Thread.sleep(500);
-        ledger.close();
-
-        ledger = factory.open(ledgerName, config);
-        cursor = (ManagedCursorImpl) ledger.openCursor("c1");
-        assertThat(cursor.isMessageDeleted(positions.get(1))).isTrue();
-        assertThat(cursor.isMessageDeleted(positions.get(4))).isTrue();
-        assertThat(cursor.isMessageDeleted(positions.get(7))).isTrue();
-        assertThat(cursor.isMessageDeleted(positions.get(10))).isTrue();
-        ledger.close();
-    }
-
-    /**
-     * Verifies that cross-ledger AckStateRef targets are actually fetched and applied.
-     * Forces cursor-ledger rollover so refs point to a previous cursor ledger, then
-     * reopens and verifies every individual ack survives recovery.
-     */
-    @Test(timeOut = 60000)
-    public void testCheckpointCrossLedgerRefFetchAndApply() throws Exception {
-        ManagedLedgerConfig config = new ManagedLedgerConfig();
-        config.setPersistentUnackedRangesWithPerLedgerEntryEnabled(true);
-        config.setMaxEntriesPerLedger(3);
-        config.setMetadataMaxEntriesPerLedger(3);
-        config.setMaxUnackedRangesToPersistInMetadataStore(-1);
-        config.setThrottleMarkDelete(0);
-
-        String ledgerName = "test_xledger_ref_apply";
-        ManagedLedger ledger = factory.open(ledgerName, config);
-        ManagedCursorImpl cursor = (ManagedCursorImpl) ledger.openCursor("c1");
-
-        List<Position> positions = new ArrayList<>();
-        for (int i = 0; i < 15; i++) {
-            positions.add(ledger.addEntry(("m-" + i).getBytes(Encoding)));
-        }
-        cursor.markDelete(positions.get(0));
-        for (int i : new int[]{2, 5, 8, 11, 14}) {
-            cursor.delete(positions.get(i));
-        }
-        cursor.markDelete(positions.get(7));
-        cursor.markDelete(positions.get(12));
-
-        Thread.sleep(500);
-        ledger.close();
-
-        // Reopen — recovery must fetch refs across cursor-ledger boundaries
-        ledger = factory.open(ledgerName, config);
-        cursor = (ManagedCursorImpl) ledger.openCursor("c1");
-        for (int i : new int[]{2, 5, 8, 11, 14}) {
-            assertThat(cursor.isMessageDeleted(positions.get(i)))
-                    .as("position " + i + " should survive cross-ledger recovery")
-                    .isTrue();
-        }
-        ledger.close();
-    }
-
-    /**
      * Verifies that recovery fails fast (not silent fallback) when a checkpoint
      * references a ledger that can't be read. The cursor should rewind to ZK
      * snapshot rather than silently dropping ack state.
@@ -7291,46 +7208,6 @@ public class ManagedCursorTest extends MockedBookKeeperTestCase {
     }
 
     /**
-     * Verifies that chunked checkpoint recovery correctly assembles parts and
-     * applies the full ack state. Forces chunking via small maxEntrySize.
-     */
-    @Test(timeOut = 30000)
-    public void testCheckpointChunkedAssemblyIntegrity() throws Exception {
-        ManagedLedgerConfig config = new ManagedLedgerConfig();
-        config.setPersistentUnackedRangesWithPerLedgerEntryEnabled(true);
-        config.setPersistentUnackedRangesMaxEntrySize(1024);
-        config.setMaxUnackedRangesToPersistInMetadataStore(-1);
-        config.setThrottleMarkDelete(0);
-
-        String ledgerName = "test_chunk_assembly";
-        ManagedLedger ledger = factory.open(ledgerName, config);
-        ManagedCursorImpl cursor = (ManagedCursorImpl) ledger.openCursor("c1");
-
-        // Many acks → large primary bitmap → checkpoint > 1024 bytes → chunked
-        List<Position> positions = new ArrayList<>();
-        for (int i = 0; i < 300; i++) {
-            positions.add(ledger.addEntry(("m-" + i).getBytes(Encoding)));
-        }
-        cursor.markDelete(positions.get(0));
-        for (int i = 1; i < 300; i += 2) {
-            cursor.delete(positions.get(i));
-        }
-
-        Thread.sleep(500);
-        ledger.close();
-
-        // Recovery must assemble chunks → parse → apply
-        ledger = factory.open(ledgerName, config);
-        cursor = (ManagedCursorImpl) ledger.openCursor("c1");
-        for (int i = 1; i < 300; i += 2) {
-            assertThat(cursor.isMessageDeleted(positions.get(i)))
-                    .as("chunked recovery should preserve ack at " + i)
-                    .isTrue();
-        }
-        ledger.close();
-    }
-
-    /**
      * Verifies that if a checkpoint flush fails, the cursor keeps the previous
      * successfully persisted state and the failed update is not recovered.
      */
@@ -7374,6 +7251,452 @@ public class ManagedCursorTest extends MockedBookKeeperTestCase {
         assertThat(recoveredCursor.isMessageDeleted(positions.get(5))).isTrue();
         recoveredLedger.close();
         recoveryFactory.shutdown();
+    }
+
+    /**
+     * Regression: after recovery the per-ledger {@code lastCheckpointPos} bookkeeping must be rebuilt
+     * from the recovered checkpoint. Without it, the first persist after a restart with multiple
+     * active msg ledgers throws "Missing lastCheckpointPos" and silently falls back to the metadata
+     * store, defeating per-msgLedger persistence.
+     */
+    @Test(timeOut = 30000)
+    public void testCheckpointRecoveryRebuildsLastAppendedPos() throws Exception {
+        ManagedLedgerConfig config = new ManagedLedgerConfig();
+        config.setPersistentUnackedRangesWithPerLedgerEntryEnabled(true);
+        config.setMaxEntriesPerLedger(5);
+        config.setMaxUnackedRangesToPersistInMetadataStore(-1);
+        config.setThrottleMarkDelete(0);
+
+        String ledgerName = "test_checkpoint_rebuild_last_appended_pos";
+        ManagedLedger ledger = factory.open(ledgerName, config);
+        ManagedCursorImpl cursor = (ManagedCursorImpl) ledger.openCursor("c1");
+        List<Position> positions = new ArrayList<>();
+        for (int i = 0; i < 20; i++) {
+            positions.add(ledger.addEntry(("msg-" + i).getBytes(Encoding)));
+        }
+        cursor.markDelete(positions.get(0));
+        cursor.delete(positions.get(3));
+        cursor.delete(positions.get(7));
+        cursor.delete(positions.get(12));
+        cursor.delete(positions.get(18));
+        Thread.sleep(500);
+        ledger.close();
+
+        // Reopen, then keep using the cursor — the first post-recovery persist must succeed via the
+        // cursor ledger instead of silently degrading to the metadata store.
+        ledger = factory.open(ledgerName, config);
+        cursor = (ManagedCursorImpl) ledger.openCursor("c1");
+        assertThat(cursor.isMessageDeleted(positions.get(3))).isTrue();
+        assertThat(cursor.isMessageDeleted(positions.get(12))).isTrue();
+
+        cursor.delete(positions.get(5));
+        cursor.markDelete(positions.get(10));
+        ManagedCursorImpl cursorRef = cursor;
+        Awaitility.await().untilAsserted(
+                () -> assertThat(cursorRef.getStats().getPersistLedgerSucceed()).isGreaterThan(0));
+        ledger.close();
+    }
+
+    /**
+     * Regression: an AckStateRef points at the commit entry of a checkpoint; for a chunked
+     * checkpoint that is the last chunk part. Ref recovery must assemble the chunk before
+     * extracting the ack state, otherwise a cursor with many active msg ledgers and a small
+     * maxEntrySize fails recovery and rewinds to the ZK snapshot, losing individual acks.
+     */
+    @Test(timeOut = 60000)
+    public void testCheckpointChunkedRefRecovery() throws Exception {
+        ManagedLedgerConfig config = new ManagedLedgerConfig();
+        config.setPersistentUnackedRangesWithPerLedgerEntryEnabled(true);
+        config.setPersistentUnackedRangesMaxEntrySize(1024); // small → per-ledger checkpoints chunk
+        config.setMaxEntriesPerLedger(3); // many msg ledgers → many refs per checkpoint
+        config.setMaxUnackedRangesToPersistInMetadataStore(-1);
+        config.setThrottleMarkDelete(0);
+
+        String ledgerName = "test_checkpoint_chunked_ref_recovery";
+        ManagedLedger ledger = factory.open(ledgerName, config);
+        ManagedCursorImpl cursor = (ManagedCursorImpl) ledger.openCursor("c1");
+        List<Position> positions = new ArrayList<>();
+        for (int i = 0; i < 150; i++) {
+            positions.add(ledger.addEntry(("m-" + i).getBytes(Encoding)));
+        }
+        cursor.markDelete(positions.get(0));
+        // One ack in nearly every msg ledger → each per-ledger checkpoint carries ~50 refs,
+        // pushing it over maxEntrySize and forcing chunked writes.
+        for (int i = 1; i < 150; i += 3) {
+            cursor.delete(positions.get(i));
+        }
+        Thread.sleep(1000);
+        ledger.close();
+
+        ledger = factory.open(ledgerName, config);
+        cursor = (ManagedCursorImpl) ledger.openCursor("c1");
+        for (int i = 1; i < 150; i += 3) {
+            assertThat(cursor.isMessageDeleted(positions.get(i)))
+                    .as("chunked ref recovery should preserve ack at " + i)
+                    .isTrue();
+        }
+        ledger.close();
+    }
+
+    /**
+     * Regression: when a flush fails, only the ledgers whose checkpoints were not appended are
+     * re-marked dirty; the next flush must retry them — including a ledger that has never been
+     * persisted before. Without this, a first-time dirty ledger whose append failed would have no
+     * lastCheckpointPos and no dirty flag, wedging every subsequent persist into "Missing
+     * lastCheckpointPos" and permanently degrading to the metadata store.
+     */
+    @Test(timeOut = 30000)
+    public void testCheckpointFailedFlushRetriesMissingLedgers() throws Exception {
+        ManagedLedgerConfig config = new ManagedLedgerConfig();
+        config.setPersistentUnackedRangesWithPerLedgerEntryEnabled(true);
+        config.setMaxEntriesPerLedger(3);
+        config.setMaxUnackedRangesToPersistInMetadataStore(-1);
+        config.setThrottleMarkDelete(0);
+
+        String ledgerName = "test_checkpoint_retry_failed_ledgers";
+        ManagedLedger ledger = factory.open(ledgerName, config);
+        ManagedCursorImpl cursor = (ManagedCursorImpl) ledger.openCursor("c1");
+        List<Position> positions = new ArrayList<>();
+        for (int i = 0; i < 20; i++) {
+            positions.add(ledger.addEntry(("m-" + i).getBytes(Encoding)));
+        }
+
+        // Establish persisted positions for the first two msg ledgers (2 successful flushes).
+        cursor.markDelete(positions.get(0));
+        cursor.delete(positions.get(5)); // gap from mark-delete → no implicit flush
+        cursor.markDelete(positions.get(1));
+        ManagedCursorImpl persistedCursor = cursor;
+        Awaitility.await().untilAsserted(
+                () -> assertThat(persistedCursor.getStats().getPersistLedgerSucceed()).isGreaterThanOrEqualTo(2));
+
+        // Fail the next flush entirely: a first-time dirty ledger (5) plus the mark-delete ledger.
+        bkc.addEntryFailAfter(0, BKException.Code.NoBookieAvailableException);
+        bkc.addEntryFailAfter(1, BKException.Code.NoBookieAvailableException);
+        cursor.delete(positions.get(16)); // msg ledger 5, never persisted before
+        cursor.markDelete(positions.get(3));
+        ManagedCursorImpl failedCursor = cursor;
+        Awaitility.await().untilAsserted(
+                () -> assertThat(failedCursor.getStats().getPersistLedgerErrors()).isGreaterThan(0));
+
+        // The next flush (mark-delete in a different ledger) must retry msg ledger 5.
+        cursor.markDelete(positions.get(9));
+        ManagedCursorImpl retriedCursor = cursor;
+        Awaitility.await().untilAsserted(
+                () -> assertThat(retriedCursor.getStats().getPersistLedgerSucceed()).isGreaterThan(2));
+        ledger.close();
+
+        // The retried ack must survive recovery.
+        ledger = factory.open(ledgerName, config);
+        cursor = (ManagedCursorImpl) ledger.openCursor("c1");
+        assertThat(cursor.isMessageDeleted(positions.get(16))).isTrue();
+        assertThat(cursor.isMessageDeleted(positions.get(14))).isFalse();
+        ledger.close();
+    }
+
+    /**
+     * Regression: the first flush must succeed even when the mark-delete ledger itself holds
+     * individual acks that have never been persisted (e.g. the first acks arrived non-contiguously
+     * and did not trigger an implicit mark-delete). The mark-delete ledger's checkpoint is written
+     * first so other checkpoints in the same flush can reference it.
+     */
+    @Test(timeOut = 30000)
+    public void testCheckpointFirstFlushWithMdLedgerAcks() throws Exception {
+        ManagedLedgerConfig config = new ManagedLedgerConfig();
+        config.setPersistentUnackedRangesWithPerLedgerEntryEnabled(true);
+        config.setMaxEntriesPerLedger(3);
+        config.setMaxUnackedRangesToPersistInMetadataStore(-1);
+        config.setThrottleMarkDelete(0);
+
+        String ledgerName = "test_checkpoint_first_flush_md_ledger_acks";
+        ManagedLedger ledger = factory.open(ledgerName, config);
+        ManagedCursorImpl cursor = (ManagedCursorImpl) ledger.openCursor("c1");
+        List<Position> positions = new ArrayList<>();
+        for (int i = 0; i < 20; i++) {
+            positions.add(ledger.addEntry(("m-" + i).getBytes(Encoding)));
+        }
+
+        // Non-contiguous acks: one in the mark-delete ledger (0), one in a later ledger (1).
+        // Neither triggers an implicit mark-delete, so this is the first ledger persist.
+        cursor.delete(positions.get(2));
+        cursor.delete(positions.get(5));
+        cursor.markDelete(positions.get(1));
+
+        ManagedCursorImpl flushedCursor = cursor;
+        Awaitility.await().untilAsserted(
+                () -> assertThat(flushedCursor.getStats().getPersistLedgerSucceed()).isGreaterThan(0));
+        ledger.close();
+
+        ledger = factory.open(ledgerName, config);
+        cursor = (ManagedCursorImpl) ledger.openCursor("c1");
+        assertThat(cursor.isMessageDeleted(positions.get(2))).isTrue();
+        assertThat(cursor.isMessageDeleted(positions.get(5))).isTrue();
+        assertThat(cursor.isMessageDeleted(positions.get(3))).isFalse();
+        ledger.close();
+    }
+
+    /**
+     * Regression: a batch-index ack in a msg ledger that has no individual acks must still be
+     * persisted and survive recovery. Batch acks are tracked in {@code batchDeletedIndexes} only;
+     * without dirty-marking and ref enumeration for those ledgers, the batch ack is written once
+     * and then becomes unreachable from later checkpoints, so it is lost across restart.
+     */
+    @Test(timeOut = 30000)
+    public void testCheckpointBatchAckInNonMdLedgerSurvivesRecovery() throws Exception {
+        ManagedLedgerConfig config = new ManagedLedgerConfig();
+        config.setPersistentUnackedRangesWithPerLedgerEntryEnabled(true);
+        config.setMaxEntriesPerLedger(3);
+        config.setMaxUnackedRangesToPersistInMetadataStore(-1);
+        config.setMaxBatchDeletedIndexToPersist(1000);
+        config.setDeletionAtBatchIndexLevelEnabled(true);
+        config.setThrottleMarkDelete(0);
+
+        String ledgerName = "test_checkpoint_batch_ack_non_md_ledger";
+        ManagedLedger ledger = factory.open(ledgerName, config);
+        ManagedCursorImpl cursor = (ManagedCursorImpl) ledger.openCursor("c1");
+        List<Position> positions = new ArrayList<>();
+        for (int i = 0; i < 9; i++) {
+            positions.add(ledger.addEntry(("entry-" + i).getBytes(Encoding)));
+        }
+        cursor.markDelete(positions.get(1)); // md ledger 0
+
+        // Batch ack in msg ledger 2 (entry 7): no individual ack range, so dirty-marking must
+        // come from the batch-index path.
+        Position batchPos = positions.get(7);
+        BitSet bitSet = new BitSet(32);
+        bitSet.set(2, 5);
+        cursor.batchDeletedIndexes.put(batchPos, bitSet);
+
+        cursor.markDelete(positions.get(4)); // flush A: writes ledger 2 (dirty) + md ledger 1
+        cursor.markDelete(positions.get(5)); // flush B: md ledger 1 must ref ledger 2
+        ManagedCursorImpl flushedCursor = cursor;
+        Awaitility.await().untilAsserted(
+                () -> assertThat(flushedCursor.getStats().getPersistLedgerSucceed()).isGreaterThanOrEqualTo(2));
+        ledger.close();
+
+        ledger = factory.open(ledgerName, config);
+        cursor = (ManagedCursorImpl) ledger.openCursor("c1");
+        assertThat(cursor.getDeletedBatchIndexesAsLongArray(positions.get(7))).isNotEmpty();
+        ledger.close();
+    }
+
+    /**
+     * Regression: old cursor ledgers that are only referenced via AckStateRefs (cross-ledger refs
+     * from before a restart) must be tracked after recovery and reclaimed by GC once mark-delete
+     * passes the last msg ledger holding acks. Without recovery-time tracking, those ledgers leak
+     * forever across restarts.
+     */
+    @Test(timeOut = 60000)
+    public void testCheckpointGcReclaimsRefLedgersAcrossRestart() throws Exception {
+        ManagedLedgerConfig config = new ManagedLedgerConfig();
+        config.setPersistentUnackedRangesWithPerLedgerEntryEnabled(true);
+        config.setMaxEntriesPerLedger(3);
+        config.setMetadataMaxEntriesPerLedger(6); // exactly one rollover in phase 1
+        config.setMaxUnackedRangesToPersistInMetadataStore(-1);
+        config.setThrottleMarkDelete(0);
+
+        String ledgerName = "test_checkpoint_gc_across_restart";
+        ManagedLedger ledger = factory.open(ledgerName, config);
+        ManagedCursorImpl cursor = (ManagedCursorImpl) ledger.openCursor("c1");
+        List<Position> positions = new ArrayList<>();
+        for (int i = 0; i < 15; i++) {
+            positions.add(ledger.addEntry(("m-" + i).getBytes(Encoding)));
+        }
+        cursor.markDelete(positions.get(0));
+        long firstCursorLedger = cursor.getCursorLedger();
+        for (int i : new int[]{5, 8, 11, 14}) { // gaps → no implicit mark-delete
+            cursor.delete(positions.get(i));
+        }
+        cursor.markDelete(positions.get(1)); // flush: 5 checkpoints in the first cursor ledger
+        // The next mark-delete pushes LAC to 6 and rolls the cursor ledger over; it writes
+        // the first checkpoint into the new ledger, with refs pointing at the old one.
+        cursor.markDelete(positions.get(7));
+        long secondCursorLedger = cursor.getCursorLedger();
+        assertThat(secondCursorLedger).isNotEqualTo(firstCursorLedger);
+        ManagedCursorImpl cursorBeforeClose = cursor;
+        Awaitility.await().untilAsserted(
+                () -> assertThat(cursorBeforeClose.getStats().getPersistLedgerSucceed()).isGreaterThanOrEqualTo(3));
+        ledger.close();
+
+        // Restart: refs into the pre-restart cursor ledger must be tracked for GC.
+        ledger = factory.open(ledgerName, config);
+        cursor = (ManagedCursorImpl) ledger.openCursor("c1");
+        assertThat(cursor.isMessageDeleted(positions.get(11))).isTrue();
+        assertThat(cursor.isMessageDeleted(positions.get(14))).isTrue();
+
+        // Absorb all remaining acks, then force rollovers so GC runs.
+        for (int i = 15; i < 35; i++) {
+            positions.add(ledger.addEntry(("m-" + i).getBytes(Encoding)));
+        }
+        cursor.markDelete(positions.get(19)); // first persist creates a fresh cursor ledger
+        cursor.markDelete(positions.get(23)); // absorbs remaining acks
+        cursor.markDelete(positions.get(25));
+        cursor.markDelete(positions.get(27));
+        cursor.markDelete(positions.get(29));
+        cursor.markDelete(positions.get(31)); // forces the next rollover → GC
+
+        Set<Long> expectedReclaimed = new HashSet<>();
+        expectedReclaimed.add(firstCursorLedger);
+        expectedReclaimed.add(secondCursorLedger);
+        Awaitility.await().untilAsserted(() -> {
+            Set<Long> live = bkc.getLedgers();
+            assertThat(live).doesNotContainAnyElementsOf(expectedReclaimed);
+        });
+        ledger.close();
+    }
+
+    /**
+     * Unlike the legacy single-PositionInfo path (which truncates batch indexes at
+     * {@code maxBatchDeletedIndexToPersist}), the per-ledger path does NOT truncate: each
+     * checkpoint is bounded by chunking, so all batch indexes survive recovery.
+     */
+    @Test(timeOut = 30000)
+    public void testCheckpointBatchAckNoTruncationInPerLedgerMode() throws Exception {
+        ManagedLedgerConfig config = new ManagedLedgerConfig();
+        config.setPersistentUnackedRangesWithPerLedgerEntryEnabled(true);
+        config.setMaxEntriesPerLedger(5);
+        config.setMaxBatchDeletedIndexToPersist(3);
+        config.setDeletionAtBatchIndexLevelEnabled(true);
+        config.setMaxUnackedRangesToPersistInMetadataStore(-1);
+        config.setThrottleMarkDelete(0);
+
+        // Topic-format name: the legacy close-time meta-store snapshot still applies batch-index
+        // truncation, whose OTEL metric builds attributes via TopicName parsing.
+        String ledgerName = "my-tenant/my-ns/persistent/test_checkpoint_batch_ack_no_truncation";
+        ManagedLedger ledger = factory.open(ledgerName, config);
+        ManagedCursorImpl cursor = (ManagedCursorImpl) ledger.openCursor("c1");
+        List<Position> positions = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            positions.add(ledger.addEntry(("entry-" + i).getBytes(Encoding)));
+        }
+        cursor.markDelete(positions.get(0));
+        // Five batch acks in the same msg ledger (entries 5-9, ledger 4). Per-ledger checkpoints are
+        // bounded by chunking, so batch indexes are NOT truncated here (unlike the legacy single
+        // PositionInfo path, which applies maxBatchDeletedIndexToPersist).
+        for (int i = 5; i <= 9; i++) {
+            BitSet bitSet = new BitSet(32);
+            bitSet.set(2, 4);
+            cursor.batchDeletedIndexes.put(positions.get(i), bitSet);
+        }
+        cursor.markDelete(positions.get(2)); // flush
+        ManagedCursorImpl flushedCursor = cursor;
+        Awaitility.await().untilAsserted(
+                () -> assertThat(flushedCursor.getStats().getPersistLedgerSucceed()).isGreaterThan(0));
+        ledger.close();
+
+        ledger = factory.open(ledgerName, config);
+        cursor = (ManagedCursorImpl) ledger.openCursor("c1");
+        for (int i = 5; i <= 9; i++) {
+            assertThat(cursor.getDeletedBatchIndexesAsLongArray(positions.get(i)))
+                    .as("batch ack at position " + i).isNotEmpty();
+        }
+        ledger.close();
+    }
+
+    /**
+     * A PIP-488 write failure must not fall back to the metadata store: the unpersisted update stays
+     * in memory, is retried on the next mark-delete, and ZK is only touched by the infrequent
+     * rollover bookkeeping. This keeps the failure path off ZK (which is the point of per-ledger
+     * persistence) and relies on at-least-once redelivery as the safety net.
+     */
+    @Test(timeOut = 30000)
+    public void testCheckpointPersistFailureSkipsMetaStoreFallback() throws Exception {
+        ManagedLedgerConfig config = new ManagedLedgerConfig();
+        config.setPersistentUnackedRangesWithPerLedgerEntryEnabled(true);
+        config.setMaxEntriesPerLedger(3);
+        config.setMaxUnackedRangesToPersistInMetadataStore(-1);
+        config.setThrottleMarkDelete(0);
+
+        String ledgerName = "test_checkpoint_no_zk_fallback";
+        ManagedLedger ledger = factory.open(ledgerName, config);
+        ManagedCursorImpl cursor = (ManagedCursorImpl) ledger.openCursor("c1");
+        List<Position> positions = new ArrayList<>();
+        for (int i = 0; i < 12; i++) {
+            positions.add(ledger.addEntry(("m-" + i).getBytes(Encoding)));
+        }
+        cursor.markDelete(positions.get(0));
+        cursor.delete(positions.get(5)); // gaps → no implicit mark-delete
+        cursor.delete(positions.get(8));
+        cursor.markDelete(positions.get(1)); // successful flush with acks 5, 8
+        ManagedCursorImpl persistedCursor = cursor;
+        Awaitility.await().untilAsserted(
+                () -> assertThat(persistedCursor.getStats().getPersistLedgerSucceed()).isGreaterThanOrEqualTo(2));
+        long zkBefore = cursor.getStats().getPersistZookeeperSucceed();
+
+        // Fail the next flush entirely (ack 11 in msg ledger 3 + mark-delete ledger).
+        bkc.addEntryFailAfter(0, BKException.Code.NoBookieAvailableException);
+        bkc.addEntryFailAfter(1, BKException.Code.NoBookieAvailableException);
+        cursor.delete(positions.get(11));
+        cursor.markDelete(positions.get(4));
+        ManagedCursorImpl failedCursor = cursor;
+        Awaitility.await().untilAsserted(
+                () -> assertThat(failedCursor.getStats().getPersistLedgerErrors()).isGreaterThan(0));
+        // The failure must not have written the metadata store.
+        assertThat(cursor.getStats().getPersistZookeeperSucceed()).isEqualTo(zkBefore);
+
+        // The next mark-delete retries on a fresh cursor ledger and persists the failed ack.
+        cursor.markDelete(positions.get(7));
+        ManagedCursorImpl retriedCursor = cursor;
+        Awaitility.await().untilAsserted(
+                () -> assertThat(retriedCursor.getStats().getPersistLedgerSucceed()).isGreaterThan(2));
+        ledger.close();
+
+        ledger = factory.open(ledgerName, config);
+        cursor = (ManagedCursorImpl) ledger.openCursor("c1");
+        assertThat(cursor.isMessageDeleted(positions.get(11))).isTrue();
+        assertThat(cursor.isMessageDeleted(positions.get(10))).isFalse();
+        ledger.close();
+    }
+
+    /**
+     * A resetCursor whose own mark-delete persist fails must still apply its in-memory state change
+     * (deferred-persist semantics): the reset completes, the ack state is cleared in memory, and the
+     * next flush persists the cleared state. This also guards the reset-vs-failed-ack race: a failed
+     * normal mark-delete must never run the default align (which would advance
+     * persistentMarkDeletePosition as if the write had succeeded).
+     */
+    @Test(timeOut = 30000)
+    public void testCheckpointResetCursorSurvivesPersistFailure() throws Exception {
+        ManagedLedgerConfig config = new ManagedLedgerConfig();
+        config.setPersistentUnackedRangesWithPerLedgerEntryEnabled(true);
+        config.setMaxEntriesPerLedger(3);
+        config.setMaxUnackedRangesToPersistInMetadataStore(-1);
+        config.setThrottleMarkDelete(0);
+
+        String ledgerName = "test_checkpoint_reset_persist_failure";
+        ManagedLedger ledger = factory.open(ledgerName, config);
+        ManagedCursorImpl cursor = (ManagedCursorImpl) ledger.openCursor("c1");
+        List<Position> positions = new ArrayList<>();
+        for (int i = 0; i < 9; i++) {
+            positions.add(ledger.addEntry(("m-" + i).getBytes(Encoding)));
+        }
+        cursor.markDelete(positions.get(0));
+        cursor.delete(positions.get(5)); // gaps → no implicit mark-delete
+        cursor.delete(positions.get(8));
+        cursor.markDelete(positions.get(1)); // persists acks 5, 8
+        ManagedCursorImpl persistedCursor = cursor;
+        Awaitility.await().untilAsserted(
+                () -> assertThat(persistedCursor.getStats().getPersistLedgerSucceed()).isGreaterThanOrEqualTo(2));
+
+        // Fail the reset's own ledger persist.
+        bkc.addEntryFailAfter(0, BKException.Code.NoBookieAvailableException);
+        cursor.resetCursor(positions.get(0));
+        // The in-memory reset must have been applied even though the persist failed.
+        assertThat(cursor.isMessageDeleted(positions.get(5))).isFalse();
+        assertThat(cursor.isMessageDeleted(positions.get(8))).isFalse();
+
+        // The next flush persists the cleared state on a fresh cursor ledger.
+        cursor.markDelete(positions.get(4));
+        ManagedCursorImpl retriedCursor = cursor;
+        Awaitility.await().untilAsserted(
+                () -> assertThat(retriedCursor.getStats().getPersistLedgerSucceed()).isGreaterThan(2));
+        ledger.close();
+
+        // Recovery must not resurrect the pre-reset acks.
+        ledger = factory.open(ledgerName, config);
+        cursor = (ManagedCursorImpl) ledger.openCursor("c1");
+        assertThat(cursor.isMessageDeleted(positions.get(5))).isFalse();
+        assertThat(cursor.isMessageDeleted(positions.get(8))).isFalse();
+        ledger.close();
     }
 
 }

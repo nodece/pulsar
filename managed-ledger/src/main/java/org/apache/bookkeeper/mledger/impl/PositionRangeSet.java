@@ -506,6 +506,14 @@ class PositionRangeSet implements LongPairRangeSet<Position> {
         rangeBitmapMap.keySet().forEach(action);
     }
 
+    /**
+     * Marks a single ledger as dirty. Used for batch-index deletions, which are tracked in
+     * {@code batchDeletedIndexes} rather than in the individual-deleted range bitmap.
+     */
+    void markDirtyLedger(long ledgerId) {
+        markDirty(ledgerId, ledgerId);
+    }
+
     private void markDirty(long lowerLedgerId, long upperLedgerId) {
         if (upperLedgerId < lowerLedgerId || lowerLedgerId < 0) {
             return;
