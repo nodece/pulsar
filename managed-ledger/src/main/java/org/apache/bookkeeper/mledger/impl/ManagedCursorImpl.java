@@ -1396,6 +1396,9 @@ public class ManagedCursorImpl implements ManagedCursor {
             return 0;
         }
         Position lastPos = ledger.getLastPosition();
+        if (mdPos.compareTo(lastPos) >= 0) {
+            return 0;
+        }
         lock.readLock().lock();
         try {
             return individualDeletedMessages.cardinality(

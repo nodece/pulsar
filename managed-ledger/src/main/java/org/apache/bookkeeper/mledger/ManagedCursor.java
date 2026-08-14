@@ -418,6 +418,12 @@ public interface ManagedCursor {
     /**
      * Asynchronous mark delete.
      *
+     * <p>Note: in per-ledger persistence mode
+     * ({@code persistentUnackedRangesWithPerLedgerEntryEnabled}), a ledger write failure does not
+     * fail the operation: the position is kept in memory, retried on the next flush, and there is
+     * no metadata-store fallback. Durability is therefore eventual — a crash before the retry
+     * recovers the previous persisted position and redelivers (at-least-once).
+     *
      * @see #markDelete(Position)
      * @param position
      *            the last position that have been successfully consumed
