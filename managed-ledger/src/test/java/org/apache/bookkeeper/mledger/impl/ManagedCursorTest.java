@@ -7721,17 +7721,19 @@ public class ManagedCursorTest extends MockedBookKeeperTestCase {
         assertThat(stats.individualDeletedMessagesCount).isEqualTo(0);
         assertThat(stats.firstIndividualDeletedMessage).isNull();
 
-        // Create holes: individual deletes at 3, 7, 12 (one per msg ledger).
+        // Contiguous holes 2,3,4 (merge into one range) plus isolated holes at 7 and 12.
+        cursor.delete(positions.get(2));
         cursor.delete(positions.get(3));
+        cursor.delete(positions.get(4));
         cursor.delete(positions.get(7));
         cursor.delete(positions.get(12));
 
         stats = cursor.getCursorStats();
-        assertThat(stats.individualDeletedMessagesCount).isEqualTo(3);
-        // First hole is positions.get(3) — earliest individually deleted message.
-        assertThat(stats.firstIndividualDeletedMessage).isEqualTo(positions.get(3).toString());
+        assertThat(stats.individualDeletedMessagesCount).isEqualTo(5);
+        // First hole is positions.get(2) — the start of the contiguous run, not its end (4).
+        assertThat(stats.firstIndividualDeletedMessage).isEqualTo(positions.get(2).toString());
 
-        // Mark-delete past the first hole: it should disappear from stats.
+        // Mark-delete past the contiguous run: the first hole becomes 7.
         cursor.markDelete(positions.get(4));
         stats = cursor.getCursorStats();
         assertThat(stats.individualDeletedMessagesCount).isEqualTo(2);

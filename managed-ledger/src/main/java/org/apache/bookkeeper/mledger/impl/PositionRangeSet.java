@@ -91,6 +91,7 @@ class PositionRangeSet implements LongPairRangeSet<Position> {
     private String cachedToString = "[]";
     private boolean updatedAfterCachedForSize = true;
     private boolean updatedAfterCachedForToString = true;
+    private long totalCardinality = 0;
 
     PositionRangeSet(LongPairConsumer<Position> consumer, boolean enableMultiEntry) {
         this.consumer = consumer;
@@ -116,19 +117,38 @@ class PositionRangeSet implements LongPairRangeSet<Position> {
                 if (rangeBitmap != null) {
                     long lastEntryId = rangeBitmap.lastPresentValue();
                     if (lastEntryId > lowerEntryIdOpen) {
-                        rangeBitmap.add(lowerEntryId, Math.max(lastEntryId, lowerEntryId) + 1);
+                        addRange(rangeBitmap, lowerEntryId, Math.max(lastEntryId, lowerEntryId) + 1);
                     }
                 }
             }
             if (isValid(upperLedgerId, upperEntryId)) {
                 LongBitmap rangeBitmap = rangeBitmapMap.computeIfAbsent(upperLedgerId, k -> LongBitmaps.create());
-                rangeBitmap.add(0, upperEntryId + 1);
+                addRange(rangeBitmap, 0, upperEntryId + 1);
             }
         } else {
             LongBitmap rangeBitmap = rangeBitmapMap.computeIfAbsent(lowerLedgerId, k -> LongBitmaps.create());
-            rangeBitmap.add(lowerEntryId, upperEntryId + 1);
+            addRange(rangeBitmap, lowerEntryId, upperEntryId + 1);
         }
         invalidateCaches();
+    }
+
+    private void addRange(LongBitmap bitmap, long from, long to) {
+        long before = bitmap.cardinality();
+        bitmap.add(from, to);
+        totalCardinality += bitmap.cardinality() - before;
+    }
+
+    private void removeRange(LongBitmap bitmap, long from, long to) {
+        long before = bitmap.cardinality();
+        bitmap.remove(from, to);
+        totalCardinality -= before - bitmap.cardinality();
+    }
+
+    private void clearSubMapCardinality(Long2ObjectSortedMap<LongBitmap> subMap) {
+        for (LongBitmap bitmap : subMap.values()) {
+            totalCardinality -= bitmap.cardinality();
+        }
+        subMap.clear();
     }
 
     @Override
@@ -179,6 +199,7 @@ class PositionRangeSet implements LongPairRangeSet<Position> {
     @Override
     public void clear() {
         rangeBitmapMap.clear();
+        totalCardinality = 0;
         resetDirtyKeys();
         invalidateCaches();
     }
@@ -294,6 +315,7 @@ class PositionRangeSet implements LongPairRangeSet<Position> {
         internalRange.forEach((ledgerId, ranges) -> {
             rangeBitmapMap.put(ledgerId.longValue(), LongBitmaps.deserializeFromLongArray(ranges));
         });
+        recomputeTotalCardinality();
         invalidateCaches();
     }
 
@@ -302,10 +324,11 @@ class PositionRangeSet implements LongPairRangeSet<Position> {
         resetDirtyKeys();
         bitmaps.forEach((ledgerId, bytes) -> {
             if (bytes != null && bytes.length > 0) {
-                rangeBitmapMap.put(ledgerId,
+                rangeBitmapMap.put(ledgerId.longValue(),
                         LongBitmaps.deserialize(Unpooled.wrappedBuffer(bytes)));
             }
         });
+        recomputeTotalCardinality();
         invalidateCaches();
     }
 
@@ -395,8 +418,11 @@ class PositionRangeSet implements LongPairRangeSet<Position> {
                 ? getSafeEntry(upperEndpoint)
                 : getSafeEntry(upperEndpoint) + 1;
 
-        rangeBitmapMap.computeIfAbsent(lowerEndpoint.getLedgerId(), k -> LongBitmaps.create())
-                .add(lowerEntryIdOpen + 1);
+        LongBitmap bitmap = rangeBitmapMap.computeIfAbsent(lowerEndpoint.getLedgerId(),
+                k -> LongBitmaps.create());
+        if (bitmap.checkedAdd(lowerEntryIdOpen + 1)) {
+            totalCardinality++;
+        }
         addOpenClosed(lowerEndpoint.getLedgerId(), lowerEntryIdOpen,
                 upperEndpoint.getLedgerId(), upperEntryIdClosed);
     }
@@ -424,13 +450,13 @@ class PositionRangeSet implements LongPairRangeSet<Position> {
         boolean sameLedger = lowerLedgerId == upperLedgerId;
 
         if (lowerIsEarliest) {
-            rangeBitmapMap.headMap(upperLedgerId).clear();
+            clearSubMapCardinality(rangeBitmapMap.headMap(upperLedgerId));
         }
         if (upperIsLatest) {
-            rangeBitmapMap.tailMap(lowerLedgerId + 1).clear();
+            clearSubMapCardinality(rangeBitmapMap.tailMap(lowerLedgerId + 1));
         }
         if (!sameLedger && !lowerIsEarliest && !upperIsLatest) {
-            rangeBitmapMap.subMap(lowerLedgerId + 1, upperLedgerId).clear();
+            clearSubMapCardinality(rangeBitmapMap.subMap(lowerLedgerId + 1, upperLedgerId));
         }
 
         LongBitmap lowerSet = lowerIsEarliest ? null : rangeBitmapMap.get(lowerLedgerId);
@@ -438,13 +464,13 @@ class PositionRangeSet implements LongPairRangeSet<Position> {
                 : (sameLedger ? lowerSet : rangeBitmapMap.get(upperLedgerId));
 
         if (sameLedger && lowerSet != null) {
-            lowerSet.remove(lowerEntryId, upperEntryId + 1);
+            removeRange(lowerSet, lowerEntryId, upperEntryId + 1);
         } else {
             if (lowerSet != null) {
-                lowerSet.remove(lowerEntryId, lastPresentValue(lowerSet));
+                removeRange(lowerSet, lowerEntryId, lastPresentValue(lowerSet));
             }
             if (upperSet != null) {
-                upperSet.remove(0, upperEntryId + 1);
+                removeRange(upperSet, 0, upperEntryId + 1);
             }
         }
 
@@ -544,5 +570,17 @@ class PositionRangeSet implements LongPairRangeSet<Position> {
     private void invalidateCaches() {
         updatedAfterCachedForSize = true;
         updatedAfterCachedForToString = true;
+    }
+
+    long totalCardinality() {
+        return totalCardinality;
+    }
+
+    private void recomputeTotalCardinality() {
+        long total = 0;
+        for (LongBitmap bitmap : rangeBitmapMap.values()) {
+            total += bitmap.cardinality();
+        }
+        totalCardinality = total;
     }
 }

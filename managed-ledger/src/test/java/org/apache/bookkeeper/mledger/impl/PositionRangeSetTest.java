@@ -62,6 +62,39 @@ public class PositionRangeSetTest {
     }
 
     @Test
+    public void testTotalCardinalityMaintainedIncrementally() {
+        PositionRangeSet set = newSet();
+        assertEquals(set.totalCardinality(), 0);
+
+        set.addOpenClosed(1, -1, 1, 4); // entries 0..4 in ledger 1
+        assertEquals(set.totalCardinality(), 5);
+
+        set.addOpenClosed(1, 4, 1, 9); // entries 5..9 in ledger 1
+        assertEquals(set.totalCardinality(), 10);
+
+        set.addOpenClosed(3, -1, 5, 2); // cross-ledger: entries 0..2 in ledger 5
+        assertEquals(set.totalCardinality(), 13);
+
+        // Overlapping add contributes nothing new.
+        set.addOpenClosed(1, -1, 1, 9);
+        assertEquals(set.totalCardinality(), 13);
+
+        // Cross-check against the range-based cardinality computation.
+        assertEquals(set.cardinality(0, -1, 1_000_000, 2_000_000_000), set.totalCardinality());
+
+        set.removeAtMost(1, 4); // drop ledger-1 entries 0..4
+        assertEquals(set.totalCardinality(), 8);
+        assertEquals(set.cardinality(0, -1, 1_000_000, 2_000_000_000), set.totalCardinality());
+
+        set.remove(Range.atMost(pos(1, 9))); // drop the rest of ledger 1
+        assertEquals(set.totalCardinality(), 3);
+        assertEquals(set.cardinality(0, -1, 1_000_000, 2_000_000_000), set.totalCardinality());
+
+        set.clear();
+        assertEquals(set.totalCardinality(), 0);
+    }
+
+    @Test
     public void testDirtyLedger() {
         PositionRangeSet rangeSet = newSet();
         rangeSet.addOpenClosed(10, 0, 20, 0);

@@ -1391,29 +1391,18 @@ public class ManagedCursorImpl implements ManagedCursor {
     }
 
     long getNumberOfIndividualDeletedMessages() {
-        Position mdPos = this.markDeletePosition;
-        if (mdPos == null) {
-            return 0;
-        }
-        Position lastPos = ledger.getLastPosition();
-        if (mdPos.compareTo(lastPos) >= 0) {
-            return 0;
-        }
-        lock.readLock().lock();
-        try {
-            return individualDeletedMessages.cardinality(
-                    mdPos.getLedgerId(), mdPos.getEntryId(),
-                    lastPos.getLedgerId(), lastPos.getEntryId());
-        } finally {
-            lock.readLock().unlock();
-        }
+        return individualDeletedMessages.totalCardinality();
     }
 
     String getFirstIndividualDeletedMessage() {
         lock.readLock().lock();
         try {
             Range<Position> first = individualDeletedMessages.firstRange();
-            return first == null ? null : first.upperEndpoint().toString();
+            if (first == null) {
+                return null;
+            }
+            return PositionFactory.create(first.lowerEndpoint().getLedgerId(),
+                    first.lowerEndpoint().getEntryId() + 1).toString();
         } finally {
             lock.readLock().unlock();
         }
