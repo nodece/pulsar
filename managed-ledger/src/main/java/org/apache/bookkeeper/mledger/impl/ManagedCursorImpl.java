@@ -1390,6 +1390,32 @@ public class ManagedCursorImpl implements ManagedCursor {
         return this.individualDeletedMessagesSerializedSize;
     }
 
+    long getNumberOfIndividualDeletedMessages() {
+        Position mdPos = this.markDeletePosition;
+        if (mdPos == null) {
+            return 0;
+        }
+        Position lastPos = ledger.getLastPosition();
+        lock.readLock().lock();
+        try {
+            return individualDeletedMessages.cardinality(
+                    mdPos.getLedgerId(), mdPos.getEntryId(),
+                    lastPos.getLedgerId(), lastPos.getEntryId());
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
+    String getFirstIndividualDeletedMessage() {
+        lock.readLock().lock();
+        try {
+            Range<Position> first = individualDeletedMessages.firstRange();
+            return first == null ? null : first.upperEndpoint().toString();
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
     @Override
     public long getEstimatedSizeSinceMarkDeletePosition() {
         Position markDeletePosition = this.markDeletePosition;
@@ -4410,7 +4436,8 @@ public class ManagedCursorImpl implements ManagedCursor {
         cs.messagesConsumedCounter = getMessagesConsumedCounter();
         cs.cursorLedger = getCursorLedger();
         cs.cursorLedgerLastEntry = getCursorLedgerLastEntry();
-        cs.individuallyDeletedMessages = getIndividuallyDeletedMessages();
+        cs.individualDeletedMessagesCount = getNumberOfIndividualDeletedMessages();
+        cs.firstIndividualDeletedMessage = getFirstIndividualDeletedMessage();
         cs.lastLedgerSwitchTimestamp = DateFormatter.format(getLastLedgerSwitchTimestamp());
         cs.state = getState();
         cs.active = isActive();

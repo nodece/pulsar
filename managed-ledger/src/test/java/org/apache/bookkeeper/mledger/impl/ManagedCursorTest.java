@@ -131,6 +131,7 @@ import org.apache.commons.collections4.iterators.EmptyIterator;
 import org.apache.commons.lang3.mutable.MutableBoolean;
 import org.apache.pulsar.common.api.proto.CommandSubscribe;
 import org.apache.pulsar.common.api.proto.IntRange;
+import org.apache.pulsar.common.policies.data.ManagedLedgerInternalStats;
 import org.apache.pulsar.common.util.FutureUtil;
 import org.apache.pulsar.common.util.collections.BitSetRecyclable;
 import org.apache.pulsar.common.util.collections.LongPairRangeSet;
@@ -7696,6 +7697,52 @@ public class ManagedCursorTest extends MockedBookKeeperTestCase {
         cursor = (ManagedCursorImpl) ledger.openCursor("c1");
         assertThat(cursor.isMessageDeleted(positions.get(5))).isFalse();
         assertThat(cursor.isMessageDeleted(positions.get(8))).isFalse();
+        ledger.close();
+    }
+
+    @Test(timeOut = 30000)
+    public void testCursorStatsIndividualDeletedMessages() throws Exception {
+        ManagedLedgerConfig config = new ManagedLedgerConfig();
+        config.setMaxEntriesPerLedger(5);
+        config.setThrottleMarkDelete(0);
+
+        String ledgerName = "test_cursor_stats_individual_deleted";
+        ManagedLedger ledger = factory.open(ledgerName, config);
+        ManagedCursorImpl cursor = (ManagedCursorImpl) ledger.openCursor("c1");
+        List<Position> positions = new ArrayList<>();
+        for (int i = 0; i < 15; i++) {
+            positions.add(ledger.addEntry(("m-" + i).getBytes(Encoding)));
+        }
+
+        cursor.markDelete(positions.get(0));
+
+        // No holes yet.
+        ManagedLedgerInternalStats.CursorStats stats = cursor.getCursorStats();
+        assertThat(stats.individualDeletedMessagesCount).isEqualTo(0);
+        assertThat(stats.firstIndividualDeletedMessage).isNull();
+
+        // Create holes: individual deletes at 3, 7, 12 (one per msg ledger).
+        cursor.delete(positions.get(3));
+        cursor.delete(positions.get(7));
+        cursor.delete(positions.get(12));
+
+        stats = cursor.getCursorStats();
+        assertThat(stats.individualDeletedMessagesCount).isEqualTo(3);
+        // First hole is positions.get(3) — earliest individually deleted message.
+        assertThat(stats.firstIndividualDeletedMessage).isEqualTo(positions.get(3).toString());
+
+        // Mark-delete past the first hole: it should disappear from stats.
+        cursor.markDelete(positions.get(4));
+        stats = cursor.getCursorStats();
+        assertThat(stats.individualDeletedMessagesCount).isEqualTo(2);
+        assertThat(stats.firstIndividualDeletedMessage).isEqualTo(positions.get(7).toString());
+
+        // Mark-delete past all holes: count drops to 0.
+        cursor.markDelete(positions.get(13));
+        stats = cursor.getCursorStats();
+        assertThat(stats.individualDeletedMessagesCount).isEqualTo(0);
+        assertThat(stats.firstIndividualDeletedMessage).isNull();
+
         ledger.close();
     }
 
