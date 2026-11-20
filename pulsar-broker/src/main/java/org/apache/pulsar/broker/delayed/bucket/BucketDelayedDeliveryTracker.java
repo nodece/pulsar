@@ -821,9 +821,16 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                         this.snapshotSegmentLastIndexMap.put(
                                 new SnapshotKey(lastDelayedIndex.getLedgerId(), lastDelayedIndex.getEntryId()),
                                 bucket);
-                        for (DelayedIndex index : indexList) {
-                            sharedBucketPriorityQueue.add(index.getTimestamp(), index.getLedgerId(),
-                                    index.getEntryId());
+                        for (int i = 0; i < indexList.size(); i++) {
+                            DelayedIndex index = indexList.get(i);
+                            // Entries already removed by clear(Position) are no longer deliverable.
+                            // Keep only the last entry of the segment so loading the next segment can
+                            // still advance when that boundary entry is stale.
+                            if (this.index.contains(index.getLedgerId(), index.getEntryId())
+                                    || i == indexList.size() - 1) {
+                                sharedBucketPriorityQueue.add(index.getTimestamp(), index.getLedgerId(),
+                                        index.getEntryId());
+                            }
                         }
                     }
                 }).whenComplete((__, ex) -> {
@@ -955,6 +962,121 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                             });
                 });
         return trimFuture;
+    }
+
+    /**
+     * Clear the delayed state up to the given mark-delete position, preserving positions after it.
+     * Stale positions are removed from the in-memory index and queues; snapshots with surviving
+     * positions are kept and their stale entries are filtered as segments are loaded normally.
+     */
+    public synchronized CompletableFuture<Void> clear(Position markDeletedPosition) {
+        if (markDeletedPosition == null) {
+            return clear();
+        }
+        CompletableFuture<Void> before = trimFuture != null && !trimFuture.isDone()
+                ? trimFuture : CompletableFuture.completedFuture(null);
+        return before
+                .exceptionally(t -> {
+                    log.warn().exception(t).log("Trim/merge buckets failed, but still clear");
+                    return null;
+                })
+                .thenCompose(__ -> {
+                    List<CompletableFuture<?>> pending = new ArrayList<>();
+                    synchronized (BucketDelayedDeliveryTracker.this) {
+                        if (pendingLoad != null) {
+                            pending.add(pendingLoad);
+                        }
+                        pending.addAll(pendingDeletes);
+                        immutableBuckets.asMapOfRanges().values().forEach(bucket ->
+                                pending.add(bucket.getSnapshotCreateFuture().orElse(NULL_LONG_PROMISE)));
+                    }
+                    return FutureUtil.waitForAll(pending)
+                            .exceptionally(t -> {
+                                log.warn().exception(t)
+                                        .log("Pending delayed delivery work failed, but still clear");
+                                return null;
+                            })
+                            .thenCompose(ignore -> {
+                                Map<Range<Long>, ImmutableBucket> toDelete = new HashMap<>();
+                                synchronized (BucketDelayedDeliveryTracker.this) {
+                                    immutableBuckets.asMapOfRanges().forEach((range, bucket) -> {
+                                        removeStaleFromImmutableBucket(bucket, markDeletedPosition);
+                                        if (bucket.getDelayedIndexBitMap().isEmpty()) {
+                                            toDelete.put(range, bucket);
+                                        }
+                                    });
+                                    removeSharedQueueAtOrBefore(markDeletedPosition, toDelete);
+                                    for (Position position
+                                            : lastMutableBucket.removeMessagesAtOrBefore(markDeletedPosition)) {
+                                        index.untrack(position.getLedgerId(), position.getEntryId());
+                                    }
+                                }
+                                return deleteBuckets(toDelete);
+                            });
+                });
+    }
+
+    private void removeSharedQueueAtOrBefore(Position markDeletedPosition,
+                                             Map<Range<Long>, ImmutableBucket> bucketsToDelete) {
+        TripleLongPriorityQueue retained = new TripleLongPriorityQueue();
+        while (!sharedBucketPriorityQueue.isEmpty()) {
+            long timestamp = sharedBucketPriorityQueue.peekN1();
+            long ledgerId = sharedBucketPriorityQueue.peekN2();
+            long entryId = sharedBucketPriorityQueue.peekN3();
+            sharedBucketPriorityQueue.pop();
+            if (PositionFactory.create(ledgerId, entryId).compareTo(markDeletedPosition) > 0) {
+                retained.add(timestamp, ledgerId, entryId);
+            } else {
+                index.untrack(ledgerId, entryId);
+                // Keep the current segment boundary so loading the next snapshot segment still
+                // advances even when the boundary position itself is stale.
+                ImmutableBucket boundaryBucket =
+                        snapshotSegmentLastIndexMap.get(new SnapshotKey(ledgerId, entryId));
+                if (boundaryBucket != null && !bucketsToDelete.containsValue(boundaryBucket)) {
+                    retained.add(timestamp, ledgerId, entryId);
+                }
+            }
+        }
+        while (!retained.isEmpty()) {
+            sharedBucketPriorityQueue.add(retained.peekN1(), retained.peekN2(), retained.peekN3());
+            retained.pop();
+        }
+    }
+
+    private void removeStaleFromImmutableBucket(ImmutableBucket bucket, Position markDeletedPosition) {
+        // Collect the emptied ledgers and remove them after the iteration: the map iterator's
+        // behavior is undefined on structural modification during a for-each.
+        List<Long> emptyLedgerIds = new ArrayList<>();
+        for (Map.Entry<Long, LongBitmap> entry : bucket.getDelayedIndexBitMap().entrySet()) {
+            long ledgerId = entry.getKey();
+            LongBitmap bitmap = entry.getValue();
+            List<Long> staleEntries = new ArrayList<>();
+            bitmap.forEachLong(entryId -> {
+                Position position = PositionFactory.create(ledgerId, entryId);
+                if (position.compareTo(markDeletedPosition) <= 0) {
+                    index.untrack(ledgerId, entryId);
+                    staleEntries.add(entryId);
+                }
+            });
+            for (long entryId : staleEntries) {
+                bitmap.remove(entryId);
+            }
+            if (bitmap.isEmpty()) {
+                emptyLedgerIds.add(ledgerId);
+            }
+        }
+        emptyLedgerIds.forEach(bucket.getDelayedIndexBitMap()::remove);
+    }
+
+    private CompletableFuture<Void> deleteBuckets(Map<Range<Long>, ImmutableBucket> buckets) {
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
+        buckets.forEach((range, bucket) -> {
+            removeBucket(range);
+            snapshotSegmentLastIndexMap.entrySet().removeIf(entry -> entry.getValue() == bucket);
+            bucket.getDelayedIndexBitMap().clear();
+            futures.add(trackDelete(bucket, bucket.asyncDeleteBucketSnapshot(stats)));
+        });
+        return FutureUtil.waitForAll(futures);
     }
 
     @Override

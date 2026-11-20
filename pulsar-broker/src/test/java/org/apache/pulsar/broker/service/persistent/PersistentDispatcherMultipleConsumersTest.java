@@ -21,8 +21,10 @@ package org.apache.pulsar.broker.service.persistent;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.carrotsearch.hppc.ObjectSet;
+import io.netty.util.Timer;
 import io.prometheus.metrics.model.registry.PrometheusRegistry;
 import io.prometheus.metrics.model.snapshots.GaugeSnapshot;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -42,6 +44,8 @@ import org.apache.bookkeeper.mledger.PositionFactory;
 import org.apache.bookkeeper.mledger.impl.ManagedCursorImpl;
 import org.apache.pulsar.broker.delayed.DelayedDeliveryTracker;
 import org.apache.pulsar.broker.delayed.DelayedDeliveryTrackerFactory;
+import org.apache.pulsar.broker.delayed.bucket.BucketDelayedDeliveryTracker;
+import org.apache.pulsar.broker.delayed.bucket.BucketSnapshotStorage;
 import org.apache.pulsar.broker.service.BrokerService;
 import org.apache.pulsar.broker.service.Dispatcher;
 import org.apache.pulsar.broker.service.SharedPulsarBaseTest;
@@ -1036,6 +1040,47 @@ public class PersistentDispatcherMultipleConsumersTest extends SharedPulsarBaseT
             Assert.assertEquals(dispatcher.getDelayedDeliveryTrackerCreatePendingMessages(), 0);
         } finally {
             // Stop any further retry
+            dispatcher.close(false, Optional.empty()).get(1, TimeUnit.MINUTES);
+        }
+    }
+
+    // Temporary verification only; do not keep.
+    @Test
+    public void testBacklogClearUsesBucketTrackerClearPosition() throws Exception {
+        DelayedDeliveryTrackerFactory factory = Mockito.mock(DelayedDeliveryTrackerFactory.class);
+        AtomicReference<BucketDelayedDeliveryTracker> trackerRef = new AtomicReference<>();
+        Timer timer = Mockito.mock(Timer.class);
+        Clock clock = Mockito.mock(Clock.class);
+        Mockito.when(clock.millis()).thenReturn(System.currentTimeMillis());
+        BucketSnapshotStorage storage = Mockito.mock(BucketSnapshotStorage.class);
+        Mockito.doAnswer(invocation -> {
+            AbstractPersistentDispatcherMultipleConsumers dispatcher =
+                    invocation.getArgument(0);
+            BucketDelayedDeliveryTracker tracker = new BucketDelayedDeliveryTracker(
+                    dispatcher, timer, 1000, clock, true, storage, 5,
+                    TimeUnit.MILLISECONDS.toMillis(10), -1, 50);
+            trackerRef.set(tracker);
+            return CompletableFuture.completedFuture(tracker);
+        }).when(factory).newTrackerAsync(Mockito.any());
+
+        PersistentDispatcherMultipleConsumers dispatcher = newDispatcherWithDelayedTrackerFactory(factory);
+        ManagedCursor dispatcherCursor = dispatcher.getCursor();
+        Mockito.doReturn(PositionFactory.create(1L, 1L)).when(dispatcherCursor).getMarkDeletedPosition();
+        long deliverAtTime = System.currentTimeMillis() + 5_000;
+        try {
+            Assert.assertTrue(dispatcher.trackDelayedDelivery(1, 1, newDelayedMessageMetadata(deliverAtTime)));
+            Assert.assertTrue(dispatcher.trackDelayedDelivery(2, 1, newDelayedMessageMetadata(deliverAtTime)));
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() ->
+                    assertThat(dispatcher.getDelayedDeliveryTrackerCreatePendingMessages()).isZero());
+
+            dispatcher.clearDelayedMessagesAfterBacklogClear().get(5, TimeUnit.SECONDS);
+
+            BucketDelayedDeliveryTracker tracker = trackerRef.get();
+            Assert.assertNotNull(tracker);
+            Assert.assertFalse(tracker.containsMessage(1L, 1L));
+            Assert.assertTrue(tracker.containsMessage(2L, 1L));
+            Assert.assertEquals(tracker.getNumberOfDelayedMessages(), 1);
+        } finally {
             dispatcher.close(false, Optional.empty()).get(1, TimeUnit.MINUTES);
         }
     }

@@ -26,6 +26,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import lombok.CustomLog;
+import org.apache.bookkeeper.mledger.Position;
+import org.apache.bookkeeper.mledger.PositionFactory;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pulsar.broker.delayed.proto.DelayedIndex;
 import org.apache.pulsar.broker.delayed.proto.SnapshotMetadata;
@@ -184,6 +186,28 @@ class MutableBucket implements AutoCloseable {
 
             priorityQueue.pop();
         }
+    }
+
+    List<Position> removeMessagesAtOrBefore(Position markDeletedPosition) {
+        List<Position> removed = new ArrayList<>();
+        TripleLongPriorityQueue retained = new TripleLongPriorityQueue();
+        while (!priorityQueue.isEmpty()) {
+            long timestamp = priorityQueue.peekN1();
+            long ledgerId = priorityQueue.peekN2();
+            long entryId = priorityQueue.peekN3();
+            priorityQueue.pop();
+            Position position = PositionFactory.create(ledgerId, entryId);
+            if (position.compareTo(markDeletedPosition) > 0) {
+                retained.add(timestamp, ledgerId, entryId);
+            } else {
+                removed.add(position);
+            }
+        }
+        while (!retained.isEmpty()) {
+            priorityQueue.add(retained.peekN1(), retained.peekN2(), retained.peekN3());
+            retained.pop();
+        }
+        return removed;
     }
 
     void resetLastMutableBucketRange() {

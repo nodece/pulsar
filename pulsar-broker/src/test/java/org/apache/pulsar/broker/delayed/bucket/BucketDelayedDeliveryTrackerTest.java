@@ -680,6 +680,18 @@ public class BucketDelayedDeliveryTrackerTest extends AbstractDeliveryTrackerTes
         }
     }
 
+    private static class CountingSegmentLoadStorage extends MockBucketSnapshotStorage {
+        final AtomicLong segmentLoadCalls = new AtomicLong();
+
+        @Override
+        public CompletableFuture<List<SnapshotSegment>> getBucketSnapshotSegment(long bucketId,
+                                                                                long firstSegmentEntryId,
+                                                                                long lastSegmentEntryId) {
+            segmentLoadCalls.incrementAndGet();
+            return super.getBucketSnapshotSegment(bucketId, firstSegmentEntryId, lastSegmentEntryId);
+        }
+    }
+
     private static class RecordingDeleteStorage extends MockBucketSnapshotStorage {
         final AtomicLong deleteCalls = new AtomicLong();
 
@@ -1697,6 +1709,144 @@ public class BucketDelayedDeliveryTrackerTest extends AbstractDeliveryTrackerTes
         assertEquals(ts.tracker.getSharedBucketPriorityQueue().size(), 0);
 
         ts.close();
+    }
+
+    // Temporary verification only; do not keep.
+    @Test
+    public void verifyClearPositionPreservesLiveAndDropsStale() throws Exception {
+        TrackerWithStorage ts = createTrackerWithMockLedger(31L, 5);
+        try {
+            ts.clockTime.set(0);
+            assertTrue(ts.tracker.addMessage(31, 3, 1000));
+            assertTrue(ts.tracker.addMessage(31, 6, 2000));
+            assertTrue(ts.tracker.addMessage(32, 1, 3000));
+
+            ts.tracker.clear(PositionFactory.create(31, 5)).get(5, TimeUnit.SECONDS);
+            assertEquals(ts.tracker.getNumberOfDelayedMessages(), 2);
+
+            ts.clockTime.set(3000);
+            NavigableSet<Position> scheduled = ts.tracker.getScheduledMessages(10);
+            assertFalse(scheduled.contains(PositionFactory.create(31, 3)));
+            assertTrue(scheduled.contains(PositionFactory.create(31, 6)),
+                    "Live position after mark-delete must remain scheduled");
+            assertTrue(scheduled.contains(PositionFactory.create(32, 1)),
+                    "Live position after mark-delete must remain scheduled");
+        } finally {
+            ts.close();
+        }
+    }
+
+    // Temporary verification only; do not keep.
+    @Test
+    public void verifyClearPositionHandlesSnapshottedLivePositions() throws Exception {
+        TrackerWithStorage ts = createTrackerWithMockLedger(31L, 50, new MockBucketSnapshotStorage(), 2);
+        try {
+            ts.clockTime.set(0);
+            for (int i = 1; i <= 10; i++) {
+                assertTrue(ts.tracker.addMessage(31, i, 1000 + i));
+            }
+            for (int i = 1; i <= 5; i++) {
+                assertTrue(ts.tracker.addMessage(32, i, 2000 + i));
+            }
+            assertTrue(ts.tracker.addMessage(33, 1, 3000));
+
+            Awaitility.await().untilAsserted(() ->
+                    assertTrue(ts.tracker.getImmutableBuckets().asMapOfRanges().values().stream()
+                            .noneMatch(x -> x.merging || !x.getSnapshotCreateFuture().get().isDone())));
+
+            ts.tracker.clear(PositionFactory.create(31, 5)).get(5, TimeUnit.SECONDS);
+            assertEquals(ts.tracker.getNumberOfDelayedMessages(), 11);
+
+            ts.clockTime.set(3000);
+            List<Position> scheduled = new ArrayList<>();
+            Awaitility.await().untilAsserted(() -> {
+                scheduled.addAll(ts.tracker.getScheduledMessages(20));
+                assertEquals(scheduled.size(), 11);
+            });
+            for (int i = 1; i <= 5; i++) {
+                assertFalse(scheduled.contains(PositionFactory.create(31, i)));
+            }
+            for (int i = 6; i <= 10; i++) {
+                assertTrue(scheduled.contains(PositionFactory.create(31, i)));
+            }
+            for (int i = 1; i <= 5; i++) {
+                assertTrue(scheduled.contains(PositionFactory.create(32, i)));
+            }
+            assertTrue(scheduled.contains(PositionFactory.create(33, 1)));
+        } finally {
+            ts.close();
+        }
+    }
+
+    // Temporary verification only; do not keep.
+    @Test
+    public void verifyClearPositionDoesNotLoadSnapshotSegments() throws Exception {
+        CountingSegmentLoadStorage storage = new CountingSegmentLoadStorage();
+        TrackerWithStorage ts = createTrackerWithMockLedger(31L, 50, storage, 2);
+        try {
+            ts.clockTime.set(0);
+            for (int i = 1; i <= 10; i++) {
+                assertTrue(ts.tracker.addMessage(31, i, 1000 + i));
+            }
+            for (int i = 1; i <= 5; i++) {
+                assertTrue(ts.tracker.addMessage(32, i, 2000 + i));
+            }
+            assertTrue(ts.tracker.addMessage(33, 1, 3000));
+            Awaitility.await().untilAsserted(() ->
+                    assertTrue(ts.tracker.getImmutableBuckets().asMapOfRanges().values().stream()
+                            .noneMatch(x -> x.merging || !x.getSnapshotCreateFuture().get().isDone())));
+            assertEquals(storage.segmentLoadCalls.get(), 0);
+
+            ts.tracker.clear(PositionFactory.create(31, 5)).get(5, TimeUnit.SECONDS);
+            assertEquals(storage.segmentLoadCalls.get(), 0,
+                    "clear(Position) must not eagerly load snapshot segments");
+
+            ts.clockTime.set(3000);
+            List<Position> scheduled = new ArrayList<>();
+            Awaitility.await().untilAsserted(() -> {
+                scheduled.addAll(ts.tracker.getScheduledMessages(20));
+                assertEquals(scheduled.size(), 11);
+            });
+            assertTrue(storage.segmentLoadCalls.get() > 0,
+                    "Normal delivery should still load the retained snapshots");
+            for (int i = 1; i <= 5; i++) {
+                assertFalse(scheduled.contains(PositionFactory.create(31, i)));
+            }
+            for (int i = 6; i <= 10; i++) {
+                assertTrue(scheduled.contains(PositionFactory.create(31, i)));
+            }
+        } finally {
+            storage.clean();
+            ts.close();
+        }
+    }
+
+    // Temporary verification only; do not keep.
+    @Test
+    public void verifyClearPositionDeletesAllStaleBucket() throws Exception {
+        TrackerWithStorage ts = createTrackerWithMockLedger(31L, 50);
+        try {
+            ts.clockTime.set(0);
+            for (int i = 1; i <= 5; i++) {
+                assertTrue(ts.tracker.addMessage(31, i, 1000 + i));
+            }
+            assertTrue(ts.tracker.addMessage(32, 1, 3000));
+            Awaitility.await().untilAsserted(() ->
+                    assertTrue(ts.tracker.getImmutableBuckets().asMapOfRanges().values().stream()
+                            .noneMatch(x -> x.merging || !x.getSnapshotCreateFuture().get().isDone())));
+
+            ts.tracker.clear(PositionFactory.create(31, 5)).get(5, TimeUnit.SECONDS);
+            assertEquals(ts.tracker.getImmutableBuckets().asMapOfRanges().size(), 0,
+                    "A snapshot whose positions are all at or before mark-delete can be deleted directly");
+            assertEquals(ts.tracker.getNumberOfDelayedMessages(), 1);
+
+            ts.clockTime.set(3000);
+            NavigableSet<Position> scheduled = ts.tracker.getScheduledMessages(10);
+            assertFalse(scheduled.contains(PositionFactory.create(31, 5)));
+            assertTrue(scheduled.contains(PositionFactory.create(32, 1)));
+        } finally {
+            ts.close();
+        }
     }
 
     @Test

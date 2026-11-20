@@ -1801,11 +1801,11 @@ public class PersistentDispatcherMultipleConsumers extends AbstractPersistentDis
             delayedDeliveryTrackerClearPending = true;
             CompletableFuture<Void> clearFuture;
             if (delayedDeliveryTrackerCreateFuture == null) {
-                clearFuture = clearDelayedMessages();
+                clearFuture = clearDelayedMessagesForBacklogClear();
             } else {
                 clearFuture = delayedDeliveryTrackerCreateFuture
                         .applyToEither(delayedDeliveryTrackerCreateFailureFuture, result -> result)
-                        .thenCompose(__ -> clearDelayedMessages());
+                        .thenCompose(__ -> clearDelayedMessagesForBacklogClear());
             }
             CompletableFuture<Void> skipRecovery = delayedDeliveryTrackerRecoverySkipFuture;
             CompletableFuture<Void> tracked =
@@ -1815,6 +1815,15 @@ public class PersistentDispatcherMultipleConsumers extends AbstractPersistentDis
             }
             return tracked;
         }
+    }
+
+    private CompletableFuture<Void> clearDelayedMessagesForBacklogClear() {
+        Position markDeletedPosition = cursor.getMarkDeletedPosition();
+        if (delayedDeliveryTracker.isPresent()
+                && delayedDeliveryTracker.get() instanceof BucketDelayedDeliveryTracker bucketTracker) {
+            return bucketTracker.clear(markDeletedPosition);
+        }
+        return clearDelayedMessages();
     }
 
     private void installPendingAfterBacklogClear() {
