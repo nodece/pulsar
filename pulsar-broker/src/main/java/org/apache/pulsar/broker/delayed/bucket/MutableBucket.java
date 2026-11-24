@@ -26,7 +26,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import lombok.CustomLog;
-import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pulsar.broker.delayed.proto.DelayedIndex;
 import org.apache.pulsar.broker.delayed.proto.SnapshotMetadata;
 import org.apache.pulsar.broker.delayed.proto.SnapshotSegment;
@@ -50,18 +49,17 @@ class MutableBucket implements AutoCloseable {
         this.priorityQueue = new TripleLongPriorityQueue();
     }
 
-    Pair<ImmutableBucket, DelayedIndex> sealBucketAndAsyncPersistent(
+    ImmutableBucket sealBucketAndAsyncPersistent(
             long timeStepPerBucketSnapshotSegment,
-            int maxIndexesPerBucketSnapshotSegment,
-            TripleLongPriorityQueue sharedQueue) {
+            int maxIndexesPerBucketSnapshotSegment) {
         return createImmutableBucketAndAsyncPersistent(timeStepPerBucketSnapshotSegment,
-                maxIndexesPerBucketSnapshotSegment, sharedQueue,
+                maxIndexesPerBucketSnapshotSegment,
                 TripleLongPriorityDelayedIndexQueue.wrap(priorityQueue), startLedgerId, endLedgerId);
     }
 
-    Pair<ImmutableBucket, DelayedIndex> createImmutableBucketAndAsyncPersistent(
+    ImmutableBucket createImmutableBucketAndAsyncPersistent(
             final long timeStepPerBucketSnapshotSegment, final int maxIndexesPerBucketSnapshotSegment,
-            TripleLongPriorityQueue sharedQueue, DelayedIndexQueue delayedIndexQueue, final long startLedgerId,
+            DelayedIndexQueue delayedIndexQueue, final long startLedgerId,
             final long endLedgerId) {
             log.debug()
                     .attr("dispatcher", ctx.dispatcherName())
@@ -99,11 +97,6 @@ class MutableBucket implements AutoCloseable {
             final long entryId = delayedIndex.getEntryId();
 
             checkArgument(ledgerId >= startLedgerId && ledgerId <= endLedgerId);
-
-            // Move first segment of bucket snapshot to sharedBucketPriorityQueue
-            if (segmentMetadataList.size() == 0) {
-                sharedQueue.add(timestamp, ledgerId, entryId);
-            }
 
             bitMap.computeIfAbsent(ledgerId, k -> LongBitmaps.create()).add(entryId);
 
@@ -148,27 +141,23 @@ class MutableBucket implements AutoCloseable {
         final int lastSegmentEntryId = segmentMetadataList.size();
 
         ImmutableBucket bucket = new ImmutableBucket(ctx, startLedgerId, endLedgerId);
-        bucket.setCurrentSegmentEntryId(1);
+        // Segments are loaded lazily: 0 means no segment is resident, so the next load fetches
+        // segment 1 whose earliest timestamp is firstScheduleTimestamps.get(0).
+        bucket.setCurrentSegmentEntryId(0);
         bucket.setNumberBucketDelayedMessages(numMessages);
         bucket.setLastSegmentEntryId(lastSegmentEntryId);
         bucket.setFirstScheduleTimestamps(firstScheduleTimestamps);
         bucket.setDelayedIndexBitMap(immutableBucketBitMap);
 
-        // Skip first segment, because it has already been loaded
-        List<SnapshotSegment> snapshotSegments = bucketSnapshotSegments.subList(1, bucketSnapshotSegments.size());
-        bucket.setSnapshotSegments(snapshotSegments);
-
-        // Add the first snapshot segment last message to snapshotSegmentLastMessageTable
-        checkArgument(!bucketSnapshotSegments.isEmpty());
-        SnapshotSegment firstSnapshotSegment = bucketSnapshotSegments.get(0);
-        DelayedIndex lastDelayedIndex = firstSnapshotSegment.getIndexeAt(firstSnapshotSegment.getIndexesCount() - 1);
-        Pair<ImmutableBucket, DelayedIndex> result = Pair.of(bucket, lastDelayedIndex);
+        // Keep every segment resident until the create future completes: on failure the tracker
+        // downgrades the bucket to memory mode by re-queuing all of them.
+        bucket.setSnapshotSegments(bucketSnapshotSegments);
 
         CompletableFuture<Long> future = bucket.asyncSaveBucketSnapshot(
                 bucketSnapshotMetadata, bucketSnapshotSegments);
         bucket.setSnapshotCreateFuture(future);
 
-        return result;
+        return bucket;
     }
 
     void moveScheduledMessageToSharedQueue(long cutoffTime, TripleLongPriorityQueue sharedBucketPriorityQueue) {
