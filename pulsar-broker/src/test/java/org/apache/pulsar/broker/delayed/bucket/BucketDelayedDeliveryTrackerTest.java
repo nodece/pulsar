@@ -2326,6 +2326,62 @@ public class BucketDelayedDeliveryTrackerTest extends AbstractDeliveryTrackerTes
         }
     }
 
+    @Test
+    public void testDrainedBucketDeletedWhileAnotherBucketHasFutureSegments() throws Exception {
+        // Bucket A [1..1] (5 messages, 5 segments, all due at cutoff 550) must be deleted once
+        // drained, even though buckets B [2..2] and C [3..3] still hold unloaded segments whose
+        // earliest timestamp lies in the future. The loadDueSegments fast path skips the
+        // per-bucket scan when the global minimum unloaded timestamp is in the future, which also
+        // starves the drained-bucket cleanup.
+        TrackerWithStorage ts = createTrackerWithMockLedger(0L, 50);
+        try {
+            // Bucket A: ledger 1, 5 messages in 5 segments (100..500).
+            for (int i = 1; i <= 5; i++) {
+                ts.tracker.addMessage(1, i, 100L * i);
+            }
+            ts.tracker.addMessage(2, 1, 600L); // seals A [1..1]
+            // Bucket B: ledger 2, 5 messages in 5 segments (600..1000).
+            for (int i = 2; i <= 5; i++) {
+                ts.tracker.addMessage(2, i, 500L + 100L * i);
+            }
+            ts.tracker.addMessage(3, 1, 1100L); // seals B [2..2]
+            // Bucket C: ledger 3, 5 messages in 5 segments (1100..1500).
+            for (int i = 2; i <= 5; i++) {
+                ts.tracker.addMessage(3, i, 1000L + 100L * i);
+            }
+            ts.tracker.addMessage(4, 1, 1600L); // seals C [3..3]
+
+            Awaitility.await().untilAsserted(() ->
+                    assertEquals(3, ts.tracker.getImmutableBuckets().asMapOfRanges().size()));
+            Awaitility.await().untilAsserted(() ->
+                    ts.tracker.getImmutableBuckets().asMapOfRanges().values().stream()
+                            .allMatch(bucket -> bucket.getSnapshotCreateFuture().orElseThrow().isDone()));
+
+            // Deliver everything of A; B and C stay in the future.
+            ts.clockTime.set(550);
+            NavigableSet<Position> delivered = new TreeSet<>();
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+                delivered.addAll(ts.tracker.getScheduledMessages(10));
+                assertEquals(delivered.size(), 5);
+            });
+            for (int i = 1; i <= 5; i++) {
+                assertEquals(delivered.pollFirst(), PositionFactory.create(1, i));
+            }
+            assertEquals(ts.tracker.getNumberOfDelayedMessages(), 11,
+                    "A delivered; B (5) + C (5) + mutable (4,1) still tracked");
+
+            // A is fully loaded and drained: further dispatch rounds must delete its snapshot even
+            // while the earliest unloaded segment of B/C is still in the future.
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+                ts.tracker.getScheduledMessages(10);
+                assertEquals(2, ts.tracker.getImmutableBuckets().asMapOfRanges().size(),
+                        "Drained bucket A should be deleted");
+            });
+        } finally {
+            ts.close();
+        }
+    }
+
     private static void assertCountersConsistent(BucketDelayedDeliveryTracker tracker) {
         int liveBucketCount = tracker.getImmutableBuckets().asMapOfRanges().size();
         long liveSnapshotLength = tracker.getImmutableBuckets().asMapOfRanges().values().stream()

@@ -132,6 +132,11 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
     // deletes for the same bucket across dispatch rounds. Entries remove themselves on completion.
     private final Set<ImmutableBucket> pendingDrainedDeletes = ConcurrentHashMap.newKeySet();
 
+    // Buckets whose segments are all loaded. The loadDueSegments fast path skips the per-bucket
+    // scan when the global minimum unloaded timestamp is in the future; it must still examine
+    // these buckets for drained cleanup. Mutated under the tracker lock.
+    private final Set<ImmutableBucket> fullyLoadedBuckets = new HashSet<>();
+
     private final Set<CompletableFuture<Void>> pendingDeletes = ConcurrentHashMap.newKeySet();
 
     // Buckets no longer in immutableBuckets whose snapshot is still stored: a failed delete, or the source
@@ -345,6 +350,7 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
         // their bitmaps, and retain every snapshot (including overlaps) for clear() to delete and retry.
         uncleanedBuckets.addAll(recoveryBuckets);
         immutableBuckets.clear();
+        fullyLoadedBuckets.clear();
         bucketsCount.set(0);
         totalSnapshotLengthBytes.set(0);
         return 0L;
@@ -835,11 +841,13 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
      */
     private void loadDueSegments(long cutoffTime) {
         // Fast path: the cached minimum says the earliest unloaded segment is not due yet, so no
-        // bucket can need a load and the per-bucket scan is skipped entirely. A negative minimum
-        // means every segment of every bucket is loaded — the scan must still run, because it is
-        // also where drained buckets are detected and deleted.
+        // bucket can need a load and the per-bucket scan is skipped. A negative minimum means
+        // every segment of every bucket is loaded — the scan must still run, because it is also
+        // where drained buckets are detected and deleted. The scan also runs while any bucket is
+        // fully loaded: a drained bucket must be deleted even when every other bucket's next
+        // unloaded segment still lies in the future.
         long minUnloaded = minUnloadedSegmentTimestamp();
-        if (minUnloaded >= 0 && minUnloaded > cutoffTime) {
+        if (minUnloaded >= 0 && minUnloaded > cutoffTime && fullyLoadedBuckets.isEmpty()) {
             return;
         }
         // Copy: segment loads may complete inline against the mock storage and delete a drained
@@ -890,6 +898,9 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
         SnapshotSegment segment = residentSegments.get(nextSegmentId - 1);
         bucket.setCurrentSegmentEntryId(nextSegmentId);
         invalidateMinUnloadedSegmentTimestamp();
+        if (bucket.getCurrentSegmentEntryId() >= bucket.getLastSegmentEntryId()) {
+            fullyLoadedBuckets.add(bucket);
+        }
         for (DelayedIndex delayedIndex : segment.getIndexesList()) {
             sharedBucketPriorityQueue.add(delayedIndex.getTimestamp(), delayedIndex.getLedgerId(),
                     delayedIndex.getEntryId());
@@ -913,6 +924,9 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                         for (DelayedIndex index : indexList) {
                             sharedBucketPriorityQueue.add(index.getTimestamp(), index.getLedgerId(),
                                     index.getEntryId());
+                        }
+                        if (bucket.getCurrentSegmentEntryId() >= bucket.getLastSegmentEntryId()) {
+                            fullyLoadedBuckets.add(bucket);
                         }
                         invalidateMinUnloadedSegmentTimestamp();
                     }
@@ -1194,6 +1208,7 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
         if (bucket != null) {
             // Remove even if snapshot length is 0 (for newly created buckets)
             immutableBuckets.asMapOfRanges().remove(range);
+            fullyLoadedBuckets.remove(bucket);
             bucketsCount.set(immutableBuckets.asMapOfRanges().size());
             totalSnapshotLengthBytes.addAndGet(-bucket.getSnapshotLength());
             invalidateMinUnloadedSegmentTimestamp();
