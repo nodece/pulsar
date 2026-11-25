@@ -65,9 +65,11 @@ final class BucketDelayedMessageIndex {
     }
 
     /**
-     * @return true if any position of the ledger is still tracked (not yet delivered). The
-     *         per-ledger entry is removed as soon as its last position is untracked, so an absent
-     *         entry means the ledger is fully drained.
+     * Checks whether any position of the ledger is still tracked (not yet delivered). The
+     * per-ledger entry is removed as soon as its last position is untracked, so an absent
+     * entry means the ledger is fully drained.
+     *
+     * @return true if any position of the ledger is still tracked
      */
     boolean containsLedger(long ledgerId) {
         return inflightIndex.containsKey(ledgerId);
