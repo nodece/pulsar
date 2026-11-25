@@ -70,6 +70,11 @@ class ImmutableBucket {
 
     boolean merging = false;
 
+    // Set as soon as a snapshot delete claims this bucket. A create that fails afterwards must
+    // not re-queue its segments: the delete owns the cleanup, and re-queuing would resurrect
+    // entries it is about to remove.
+    private volatile boolean deleteStarted;
+
     @Setter
     @Getter
     List<Long> firstScheduleTimestamps = new ArrayList<>();
@@ -105,6 +110,10 @@ class ImmutableBucket {
     String bucketKey() {
         return String.join(DELIMITER, DELAYED_BUCKET_KEY_PREFIX, String.valueOf(startLedgerId),
                 String.valueOf(endLedgerId));
+    }
+
+    boolean isDeleteStarted() {
+        return deleteStarted;
     }
 
     Optional<CompletableFuture<Long>> getSnapshotCreateFuture() {
@@ -337,6 +346,7 @@ class ImmutableBucket {
     }
 
     CompletableFuture<Void> asyncDeleteBucketSnapshot(BucketDelayedMessageIndexStats stats) {
+        deleteStarted = true;
         long deleteStartTime = System.currentTimeMillis();
         stats.recordTriggerEvent(BucketDelayedMessageIndexStats.Type.delete);
         String bucketKey = bucketKey();

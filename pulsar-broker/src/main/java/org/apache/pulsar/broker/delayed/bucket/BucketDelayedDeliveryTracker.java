@@ -85,6 +85,14 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
 
     private static final int MAX_MERGE_NUM = 4;
 
+    /**
+     * Upper bound on the segment reads armed by a single dispatch round. When more buckets are
+     * due than this, the remaining loads are armed by the rounds that the settling batch
+     * re-triggers, spreading catch-up bursts (e.g. after a restart) instead of issuing every
+     * read at once.
+     */
+    private static final int MAX_ARMED_SEGMENT_LOADS_PER_ROUND = 256;
+
     private final long minIndexCountPerBucket;
 
     private final long timeStepPerBucketSnapshotSegmentInMillis;
@@ -456,8 +464,15 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                             .log("Failed to create bucket snapshot");
                     stats.recordFailEvent(BucketDelayedMessageIndexStats.Type.create);
 
-                    // Put indexes back into the shared queue and downgrade to memory mode
+                    // Put indexes back into the shared queue and downgrade to memory mode, unless
+                    // a trim or clear has already claimed the bucket for deletion: the delete owns
+                    // the cleanup, and re-queuing would resurrect entries it is about to remove.
                     synchronized (BucketDelayedDeliveryTracker.this) {
+                        if (immutableBucket.isDeleteStarted() || immutableBuckets.asMapOfRanges()
+                                .get(Range.closed(immutableBucket.getStartLedgerId(),
+                                        immutableBucket.getEndLedgerId())) != immutableBucket) {
+                            return INVALID_BUCKET_ID;
+                        }
                         immutableBucket.getSnapshotSegments().ifPresent(snapshotSegments -> {
                             for (SnapshotSegment snapshotSegment : snapshotSegments) {
                                 for (DelayedIndex delayedIndex : snapshotSegment.getIndexesList()) {
@@ -782,11 +797,10 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
         lastMutableBucket.moveScheduledMessageToSharedQueue(cutoffTime, sharedBucketPriorityQueue);
 
         // Only loaded segments are deliverable, so arm the loads for every segment that is due
-        // now. If any load is (still) in flight, deliver nothing this round: once the batch
-        // settles, the re-triggered round sees every source due at this cutoff in the shared
-        // queue and returns them position-ordered.
-        loadDueSegments(cutoffTime);
-        if (!checkPendingLoadDone()) {
+        // now. Deliver nothing while loads are in flight or the round limit left due segments
+        // unarmed: once everything due at this cutoff is resident, the re-triggered round
+        // returns all sources position-ordered.
+        if (!loadDueSegments(cutoffTime) || !checkPendingLoadDone()) {
             updateTimer();
             return new TreeSet<>();
         }
@@ -838,8 +852,11 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
      * <p>Buckets whose segments are all loaded are checked for being drained; a drained bucket's
      * snapshot is deleted here (replacing the former "terminal segment load" cleanup, which no
      * longer exists with lazy loading).
+     *
+     * @return false when the round limit left due segments unarmed (delivery must wait for the
+     *         rounds that the settling batch re-triggers)
      */
-    private void loadDueSegments(long cutoffTime) {
+    private boolean loadDueSegments(long cutoffTime) {
         // Fast path: the cached minimum says the earliest unloaded segment is not due yet, so no
         // bucket can need a load and the per-bucket scan is skipped. A negative minimum means
         // every segment of every bucket is loaded — the scan must still run, because it is also
@@ -848,10 +865,12 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
         // unloaded segment still lies in the future.
         long minUnloaded = minUnloadedSegmentTimestamp();
         if (minUnloaded >= 0 && minUnloaded > cutoffTime && fullyLoadedBuckets.isEmpty()) {
-            return;
+            return true;
         }
         // Copy: segment loads may complete inline against the mock storage and delete a drained
         // bucket from the range map during the iteration.
+        int armedLoads = 0;
+        boolean allDueHandled = true;
         for (ImmutableBucket bucket : new ArrayList<>(immutableBuckets.asMapOfRanges().values())) {
             long nextUnloadedSegmentTimestamp = bucket.getNextUnloadedSegmentTimestamp();
             if (nextUnloadedSegmentTimestamp < 0) {
@@ -862,30 +881,43 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                 // Not due yet, or the merged bucket owns the segment chain until the merge settles.
                 continue;
             }
-            loadNextSegment(bucket);
+            if (armedLoads >= MAX_ARMED_SEGMENT_LOADS_PER_ROUND && bucket.getSnapshotSegments().isEmpty()) {
+                // Round limit reached: the settling batch re-triggers the rounds that arm the
+                // remaining due loads. Delivery must wait, or earlier positions of the same due
+                // window would be returned out of order.
+                allDueHandled = false;
+                continue;
+            }
+            if (loadNextSegment(bucket) && bucket.getSnapshotSegments().isEmpty()) {
+                armedLoads++;
+            }
         }
+        return allDueHandled;
     }
 
     /**
-     * Makes the next unloaded segment of the bucket deliverable. Storage reads are armed without
-     * waiting: every due bucket gets its load in this round, and the completion of the batch
+     * Makes the next unloaded segment of the bucket deliverable. Resident segments are served
+     * synchronously; storage reads are armed without waiting, and the completion of the batch
      * re-triggers the dispatch rounds.
+     *
+     * @return true when a storage read was armed for this bucket
      */
-    private void loadNextSegment(ImmutableBucket bucket) {
+    private boolean loadNextSegment(ImmutableBucket bucket) {
         List<SnapshotSegment> residentSegments = bucket.getSnapshotSegments().orElse(null);
         if (residentSegments != null) {
             serveResidentSegment(bucket, residentSegments);
-            return;
+            return false;
         }
 
         if (!bucket.getSnapshotCreateFuture().orElse(NULL_LONG_PROMISE).isDone()) {
             log.info()
                     .attr("bucketKey", bucket.bucketKey())
                     .log("Skip load to wait for bucket snapshot create finish");
-            return;
+            return false;
         }
 
         loadSegmentFromStorage(bucket);
+        return true;
     }
 
     /**

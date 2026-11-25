@@ -616,6 +616,61 @@ public class BucketDelayedDeliveryTrackerTest extends AbstractDeliveryTrackerTes
         tracker.close();
     }
 
+    /**
+     * Storage whose snapshot creations wait for a gate, so segments are served from the resident
+     * in-memory list while the create is still in flight; releasing the gate exceptionally makes
+     * the create fail and downgrades the bucket to memory mode.
+     */
+    private static class GatedFailingCreateStorage extends MockBucketSnapshotStorage {
+        final CompletableFuture<Void> createGate = new CompletableFuture<>();
+
+        @Override
+        public CompletableFuture<Long> createBucketSnapshot(SnapshotMetadata snapshotMetadata,
+                                                            List<SnapshotSegment> bucketSnapshotSegments,
+                                                            String bucketKey, String topicName, String cursorName) {
+            return createGate.thenCompose(
+                    __ -> FutureUtil.failedFuture(new BucketSnapshotPersistenceException("Create failed")));
+        }
+    }
+
+    @Test
+    public void testCreateFailDowngradeAfterResidentDeliveryDeliversEachMessageOnce() throws Exception {
+        GatedFailingCreateStorage storage = new GatedFailingCreateStorage();
+        TrackerWithStorage ts = createTrackerWithMockLedger(0L, 50, storage);
+        try {
+            for (int i = 1; i <= 6; i++) {
+                ts.tracker.addMessage(i, i, 10L * i);
+            }
+            Awaitility.await().untilAsserted(() ->
+                    assertEquals(ts.tracker.getImmutableBuckets().asMapOfRanges().size(), 1));
+
+            // Everything is due while the create is still gated: the segments are served from
+            // the resident list and delivered in order.
+            ts.clockTime.set(60);
+            NavigableSet<Position> delivered = new TreeSet<>();
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+                delivered.addAll(ts.tracker.getScheduledMessages(10));
+                assertEquals(delivered.size(), 6);
+            });
+            for (int i = 1; i <= 6; i++) {
+                assertEquals(delivered.pollFirst(), PositionFactory.create(i, i));
+            }
+
+            // The create fails once the gate releases; the downgrade re-queues every segment,
+            // but the delivered positions are already untracked, so nothing is delivered twice.
+            storage.createGate.completeExceptionally(new IllegalStateException("release"));
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() ->
+                    assertEquals(ts.tracker.getImmutableBuckets().asMapOfRanges().size(), 0));
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+                assertTrue(ts.tracker.getScheduledMessages(10).isEmpty(),
+                        "The re-queued segments must not deliver anything twice");
+                assertEquals(ts.tracker.getNumberOfDelayedMessages(), 0);
+            });
+        } finally {
+            ts.close();
+        }
+    }
+
     @Test(dataProvider = "delayedTracker")
     public void testMaxIndexesPerSegment(BucketDelayedDeliveryTracker tracker) {
         for (int i = 1; i <= 101; i++) {
