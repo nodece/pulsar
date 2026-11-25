@@ -145,6 +145,12 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
     // these buckets for drained cleanup. Mutated under the tracker lock.
     private final Set<ImmutableBucket> fullyLoadedBuckets = new HashSet<>();
 
+    // Rotation base for the loadDueSegments scan: with a large due batch each round arms at most
+    // MAX_ARMED_SEGMENT_LOADS_PER_ROUND loads, and always scanning from the same bucket would let
+    // the leading buckets monopolize the rounds while the tail waits. Mutated under the tracker
+    // lock.
+    private int loadScanOffset = 0;
+
     private final Set<CompletableFuture<Void>> pendingDeletes = ConcurrentHashMap.newKeySet();
 
     // Buckets no longer in immutableBuckets whose snapshot is still stored: a failed delete, or the source
@@ -791,31 +797,28 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
 
     @Override
     public synchronized NavigableSet<Position> getScheduledMessages(int maxMessages) {
-        if (!checkPendingLoadDone()) {
-            log.debug("Skip getScheduledMessages to wait for bucket snapshot load finish");
-            return new TreeSet<>();
-        }
-
         long cutoffTime = getCutoffTime();
         Long firstLiveLedgerId = firstActiveLedgerId();
 
         lastMutableBucket.moveScheduledMessageToSharedQueue(cutoffTime, sharedBucketPriorityQueue);
 
-        // Only loaded segments are deliverable, so arm the loads for every segment that is due
-        // now. Deliver nothing while loads are in flight or the round limit left due segments
-        // unarmed: once everything due at this cutoff is resident, the re-triggered round
-        // returns all sources position-ordered.
-        if (!loadDueSegments(cutoffTime) || !checkPendingLoadDone()) {
-            updateTimer();
-            return new TreeSet<>();
+        // Arm another batch of segment loads only when the previous one settled: a bucket whose
+        // load is still in flight must not be re-armed from the same segment pointer.
+        if (checkPendingLoadDone()) {
+            loadDueSegments(cutoffTime);
         }
+
+        // Positions strictly below the earliest unloaded segment cannot be overtaken by any
+        // pending or unarmed load, so they are safe to deliver now (progressive catch-up). Equal
+        // timestamps wait for the barrier, so positions with the same deliverAt keep their order.
+        long barrier = minUnloadedSegmentTimestamp();
 
         NavigableSet<Position> positions = new TreeSet<>();
         int n = maxMessages;
 
         while (n > 0 && !sharedBucketPriorityQueue.isEmpty()) {
             long timestamp = sharedBucketPriorityQueue.peekN1();
-            if (timestamp > cutoffTime) {
+            if (timestamp > cutoffTime || (barrier >= 0 && timestamp >= barrier)) {
                 break;
             }
 
@@ -846,22 +849,21 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
     }
 
     /**
-     * Loads the next segment of every bucket whose earliest unloaded timestamp is due. All due
-     * loads are armed together and {@link #getScheduledMessages} only delivers once the whole
-     * batch settles: every source due at the same cutoff is then present in the shared queue, so
-     * the positions a dispatch round returns keep their order even when some of them had to be
-     * fetched from BookKeeper first. Segments of a bucket whose snapshot creation has not
-     * completed yet are served from the resident in-memory segment list synchronously — there is
-     * no durable copy to read yet, and delivery must not wait for the persistence to finish.
+     * Loads the next segment of every bucket whose earliest unloaded timestamp is due, at most
+     * {@link #MAX_ARMED_SEGMENT_LOADS_PER_ROUND} storage reads per round. The scan starts at a
+     * rotating offset so a large due batch does not let the leading buckets starve the tail.
+     * Delivery is gated by the timestamp barrier in {@link #getScheduledMessages}, not by this
+     * method: a segment whose load is in flight (or unarmed because of the round limit) only
+     * holds back positions at or after its earliest timestamp. Segments of a bucket whose
+     * snapshot creation has not completed yet are served from the resident in-memory segment
+     * list synchronously — there is no durable copy to read yet, and delivery must not wait for
+     * the persistence to finish.
      *
      * <p>Buckets whose segments are all loaded are checked for being drained; a drained bucket's
      * snapshot is deleted here (replacing the former "terminal segment load" cleanup, which no
      * longer exists with lazy loading).
-     *
-     * @return false when the round limit left due segments unarmed (delivery must wait for the
-     *         rounds that the settling batch re-triggers)
      */
-    private boolean loadDueSegments(long cutoffTime) {
+    private void loadDueSegments(long cutoffTime) {
         // Fast path: the cached minimum says the earliest unloaded segment is not due yet, so no
         // bucket can need a load and the per-bucket scan is skipped. A negative minimum means
         // every segment of every bucket is loaded — the scan must still run, because it is also
@@ -870,13 +872,18 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
         // unloaded segment still lies in the future.
         long minUnloaded = minUnloadedSegmentTimestamp();
         if (minUnloaded >= 0 && minUnloaded > cutoffTime && fullyLoadedBuckets.isEmpty()) {
-            return true;
+            return;
         }
-        // Copy: segment loads may complete inline against the mock storage and delete a drained
-        // bucket from the range map during the iteration.
+        List<ImmutableBucket> buckets = new ArrayList<>(immutableBuckets.asMapOfRanges().values());
+        if (buckets.isEmpty()) {
+            return;
+        }
+        // Rotate the scan start so a due batch is spread across buckets instead of letting the
+        // leading buckets monopolize the per-round load cap.
+        int offset = loadScanOffset % buckets.size();
         int armedLoads = 0;
-        boolean allDueHandled = true;
-        for (ImmutableBucket bucket : new ArrayList<>(immutableBuckets.asMapOfRanges().values())) {
+        for (int i = 0; i < buckets.size(); i++) {
+            ImmutableBucket bucket = buckets.get((offset + i) % buckets.size());
             long nextUnloadedSegmentTimestamp = bucket.getNextUnloadedSegmentTimestamp();
             if (nextUnloadedSegmentTimestamp < 0) {
                 maybeDeleteDrainedBucket(bucket);
@@ -887,17 +894,15 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                 continue;
             }
             if (armedLoads >= MAX_ARMED_SEGMENT_LOADS_PER_ROUND && bucket.getSnapshotSegments().isEmpty()) {
-                // Round limit reached: the settling batch re-triggers the rounds that arm the
-                // remaining due loads. Delivery must wait, or earlier positions of the same due
-                // window would be returned out of order.
-                allDueHandled = false;
+                // Round limit reached: the remaining due loads are armed by the rounds the
+                // settling batch re-triggers; their earliest timestamps act as delivery barriers.
                 continue;
             }
             if (loadNextSegment(bucket) && bucket.getSnapshotSegments().isEmpty()) {
                 armedLoads++;
             }
         }
-        return allDueHandled;
+        loadScanOffset = (offset + armedLoads) % buckets.size();
     }
 
     /**

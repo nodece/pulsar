@@ -633,6 +633,25 @@ public class BucketDelayedDeliveryTrackerTest extends AbstractDeliveryTrackerTes
         }
     }
 
+    /**
+     * Storage whose second snapshot segment read waits for a gate, so the first segment can be
+     * loaded and delivered while the second one is still in flight.
+     */
+    private static class GateSecondSegmentLoadStorage extends MockBucketSnapshotStorage {
+        final CompletableFuture<Void> secondSegmentGate = new CompletableFuture<>();
+
+        @Override
+        public CompletableFuture<List<SnapshotSegment>> getBucketSnapshotSegment(long bucketId,
+                long firstSegmentEntryId, long lastSegmentEntryId) {
+            CompletableFuture<List<SnapshotSegment>> future = super.getBucketSnapshotSegment(bucketId,
+                    firstSegmentEntryId, lastSegmentEntryId);
+            if (firstSegmentEntryId == 2) {
+                return secondSegmentGate.thenCompose(__ -> future);
+            }
+            return future;
+        }
+    }
+
     @Test
     public void testCreateFailDowngradeAfterResidentDeliveryDeliversEachMessageOnce() throws Exception {
         GatedFailingCreateStorage storage = new GatedFailingCreateStorage();
@@ -666,6 +685,47 @@ public class BucketDelayedDeliveryTrackerTest extends AbstractDeliveryTrackerTes
                         "The re-queued segments must not deliver anything twice");
                 assertEquals(ts.tracker.getNumberOfDelayedMessages(), 0);
             });
+        } finally {
+            ts.close();
+        }
+    }
+
+    @Test
+    public void testProgressiveDeliveryWhileLaterSegmentLoads() throws Exception {
+        // The first segment's position must be delivered while the second segment's read is still
+        // in flight: a pending load only holds back positions at or after its earliest timestamp,
+        // so catch-up does not serialize on the whole due window.
+        GateSecondSegmentLoadStorage storage = new GateSecondSegmentLoadStorage();
+        TrackerWithStorage ts = createTrackerWithMockLedger(0L, 50, storage);
+        try {
+            for (int i = 1; i <= 6; i++) {
+                ts.tracker.addMessage(i, i, 10L * i);
+            }
+            Awaitility.await().untilAsserted(() ->
+                    assertEquals(1, ts.tracker.getImmutableBuckets().asMapOfRanges().size()));
+            Awaitility.await().untilAsserted(() ->
+                    ts.tracker.getImmutableBuckets().asMapOfRanges().values().stream()
+                            .allMatch(bucket -> bucket.getSnapshotCreateFuture().orElseThrow().isDone()));
+
+            ts.clockTime.set(1000);
+            NavigableSet<Position> delivered = new TreeSet<>();
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+                delivered.addAll(ts.tracker.getScheduledMessages(10));
+                assertTrue(delivered.contains(PositionFactory.create(1, 1)),
+                        "Segment 1's position must be delivered while segment 2's read is gated");
+            });
+            assertEquals(ts.tracker.getNumberOfDelayedMessages(), 5,
+                    "Only (1,1) delivered while segment 2 is still loading");
+
+            // Release the gate: the rest arrives in timestamp order.
+            storage.secondSegmentGate.complete(null);
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+                delivered.addAll(ts.tracker.getScheduledMessages(10));
+                assertEquals(delivered.size(), 6);
+            });
+            for (int i = 1; i <= 6; i++) {
+                assertEquals(delivered.pollFirst(), PositionFactory.create(i, i));
+            }
         } finally {
             ts.close();
         }
@@ -2263,8 +2323,9 @@ public class BucketDelayedDeliveryTrackerTest extends AbstractDeliveryTrackerTes
                 return null;
             }).when(testDispatcher).readMoreEntriesAsync();
             // The snapshot segment read is still gated, so this round arms the load and delivers
-            // nothing: the batch gate holds the mutable message back too, so a load-triggered
-            // round returns both sources position-ordered.
+            // nothing below the barrier: the mutable message's timestamp is at or after the gated
+            // segment's earliest timestamp, so it waits for the load-triggered round to keep both
+            // sources position-ordered.
             NavigableSet<Position> firstScheduled = tracker.getScheduledMessages(10);
             assertEquals(firstScheduled.size(), 0);
             segmentReads.complete(null);
