@@ -324,6 +324,9 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                 }
                 totalSnapshotLengthBytes.set(totalLength);
                 bucketsCount.set(immutableBuckets.asMapOfRanges().size());
+                // Recovery sets each bucket's currentSegmentEntryId on the storage executor after
+                // the bucket was put, so the cached minimum cannot be trusted from the put alone.
+                invalidateMinUnloadedSegmentTimestamp();
 
                 log.info()
                         .attr("buckets", immutableBucketMap.size())
@@ -710,16 +713,41 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
         }
         // Segments that are not loaded yet keep only their earliest delivery timestamp in memory;
         // it must take part in the timer target, otherwise the load would never be triggered.
-        for (ImmutableBucket bucket : immutableBuckets.asMapOfRanges().values()) {
-            long nextUnloadedSegmentTimestamp = bucket.getNextUnloadedSegmentTimestamp();
-            if (nextUnloadedSegmentTimestamp >= 0) {
-                timestamp = Math.min(timestamp, nextUnloadedSegmentTimestamp);
-            }
+        // The minimum is cached: addMessage calls this via updateTimer on the hot write path, and
+        // scanning every bucket does not scale to thousands of sealed buckets. All invalidation
+        // points (bucket added/removed, segment loaded) run under this same lock.
+        long minUnloaded = minUnloadedSegmentTimestamp();
+        if (minUnloaded >= 0) {
+            timestamp = Math.min(timestamp, minUnloaded);
         }
         // numberDelayedMessages can be > 0 while no source holds a timestamp (e.g. remaining
         // messages live in segments of a bucket whose creation is still in flight). Returning
         // Long.MAX_VALUE signals "no imminent delivery" without throwing on the empty queues.
         return timestamp;
+    }
+
+    /** Sentinel for {@link #cachedMinUnloadedSegmentTimestamp}: must be recomputed. */
+    private static final long MIN_UNLOADED_DIRTY = -2;
+
+    private long cachedMinUnloadedSegmentTimestamp = MIN_UNLOADED_DIRTY;
+
+    private long minUnloadedSegmentTimestamp() {
+        if (cachedMinUnloadedSegmentTimestamp == MIN_UNLOADED_DIRTY) {
+            long min = -1;
+            for (ImmutableBucket bucket : immutableBuckets.asMapOfRanges().values()) {
+                long nextUnloadedSegmentTimestamp = bucket.getNextUnloadedSegmentTimestamp();
+                if (nextUnloadedSegmentTimestamp >= 0
+                        && (min < 0 || nextUnloadedSegmentTimestamp < min)) {
+                    min = nextUnloadedSegmentTimestamp;
+                }
+            }
+            cachedMinUnloadedSegmentTimestamp = min;
+        }
+        return cachedMinUnloadedSegmentTimestamp;
+    }
+
+    private void invalidateMinUnloadedSegmentTimestamp() {
+        cachedMinUnloadedSegmentTimestamp = MIN_UNLOADED_DIRTY;
     }
 
     @Override
@@ -795,6 +823,14 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
      * longer exists with lazy loading).
      */
     private void loadDueSegments(long cutoffTime) {
+        // Fast path: the cached minimum says the earliest unloaded segment is not due yet, so no
+        // bucket can need a load and the per-bucket scan is skipped entirely. A negative minimum
+        // means every segment of every bucket is loaded — the scan must still run, because it is
+        // also where drained buckets are detected and deleted.
+        long minUnloaded = minUnloadedSegmentTimestamp();
+        if (minUnloaded >= 0 && minUnloaded > cutoffTime) {
+            return;
+        }
         // Copy: segment loads may complete inline against the mock storage and delete a drained
         // bucket from the range map during the iteration.
         for (ImmutableBucket bucket : new ArrayList<>(immutableBuckets.asMapOfRanges().values())) {
@@ -821,6 +857,7 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                 int nextSegmentId = bucket.getCurrentSegmentEntryId() + 1;
                 SnapshotSegment segment = residentSegments.get(nextSegmentId - 1);
                 bucket.setCurrentSegmentEntryId(nextSegmentId);
+                invalidateMinUnloadedSegmentTimestamp();
                 for (DelayedIndex delayedIndex : segment.getIndexesList()) {
                     sharedBucketPriorityQueue.add(delayedIndex.getTimestamp(), delayedIndex.getLedgerId(),
                             delayedIndex.getEntryId());
@@ -851,6 +888,7 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                                 sharedBucketPriorityQueue.add(index.getTimestamp(), index.getLedgerId(),
                                         index.getEntryId());
                             }
+                            invalidateMinUnloadedSegmentTimestamp();
                         }
                     }).whenComplete((__, ex) -> {
                         if (ex != null) {
@@ -1128,6 +1166,7 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
         immutableBuckets.put(range, bucket);
         bucketsCount.set(immutableBuckets.asMapOfRanges().size());
         totalSnapshotLengthBytes.addAndGet(bucket.getSnapshotLength() - removedLength);
+        invalidateMinUnloadedSegmentTimestamp();
     }
 
     private void removeBucket(Range<Long> range) {
@@ -1139,6 +1178,7 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
             immutableBuckets.asMapOfRanges().remove(range);
             bucketsCount.set(immutableBuckets.asMapOfRanges().size());
             totalSnapshotLengthBytes.addAndGet(-bucket.getSnapshotLength());
+            invalidateMinUnloadedSegmentTimestamp();
         }
     }
 
