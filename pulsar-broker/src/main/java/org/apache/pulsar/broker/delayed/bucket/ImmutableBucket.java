@@ -292,7 +292,10 @@ class ImmutableBucket {
     /**
      * Segments considered loaded for merge eligibility. A lazy bucket (no segment resident yet,
      * {@code currentSegmentEntryId == 0}) counts as one loaded segment, so a single-segment
-     * bucket stays unmergeable exactly as with eager loading.
+     * bucket stays unmergeable exactly as with eager loading. After recovery with {@code k}
+     * skipped due segments the bucket is eligible one segment earlier than the eager baseline
+     * (the first not-due segment is not pre-loaded); this is safe because merging reads every
+     * segment from storage anyway.
      */
     int mergeEligibilityLoadedSegments() {
         return Math.max(currentSegmentEntryId, 1);

@@ -471,6 +471,11 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                         if (immutableBucket.isDeleteStarted() || immutableBuckets.asMapOfRanges()
                                 .get(Range.closed(immutableBucket.getStartLedgerId(),
                                         immutableBucket.getEndLedgerId())) != immutableBucket) {
+                            log.warn()
+                                    .attr("bucketKey", immutableBucket.bucketKey())
+                                    .log("Skip re-queueing segments after a failed bucket snapshot create: "
+                                            + "the bucket was already claimed by a delete or replaced "
+                                            + "in the range map");
                             return INVALID_BUCKET_ID;
                         }
                         immutableBucket.getSnapshotSegments().ifPresent(snapshotSegments -> {
