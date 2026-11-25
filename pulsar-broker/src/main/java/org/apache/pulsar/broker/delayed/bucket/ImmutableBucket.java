@@ -282,8 +282,24 @@ class ImmutableBucket {
      * been loaded. {@code firstScheduleTimestamps} is zero-based while segment ids start at 1,
      * so index {@code currentSegmentEntryId} describes segment {@code currentSegmentEntryId + 1}.
      */
+    /** Checks whether at least one snapshot segment is not loaded into memory yet.
+     *
+     * @return true while the bucket still has unloaded segments
+     */
+    boolean hasUnloadedSegments() {
+        return currentSegmentEntryId < lastSegmentEntryId;
+    }
+
+    /** Checks whether every snapshot segment has been loaded.
+     *
+     * @return true when no segment is left to load
+     */
+    boolean allSegmentsLoaded() {
+        return !hasUnloadedSegments();
+    }
+
     long getNextUnloadedSegmentTimestamp() {
-        if (currentSegmentEntryId >= lastSegmentEntryId) {
+        if (allSegmentsLoaded()) {
             return -1;
         }
         return firstScheduleTimestamps.get(currentSegmentEntryId);
