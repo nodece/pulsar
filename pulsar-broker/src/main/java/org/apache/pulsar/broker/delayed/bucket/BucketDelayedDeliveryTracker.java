@@ -124,7 +124,10 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
 
     private final BucketDelayedMessageIndexStats stats;
 
-    private CompletableFuture<Void> pendingLoad = null;
+    // Segment loads armed by loadDueSegments that have not settled yet. Delivery waits for the
+    // whole batch (pruned as futures complete), so a round only returns positions that were all
+    // resident before it started popping. Mutated under the tracker lock.
+    private final Set<CompletableFuture<Void>> pendingLoads = new HashSet<>();
 
     // Drained buckets whose snapshot delete is in flight; guards against stacking concurrent
     // deletes for the same bucket across dispatch rounds. Entries remove themselves on completion.
@@ -764,7 +767,7 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
     public synchronized NavigableSet<Position> getScheduledMessages(int maxMessages) {
         if (!checkPendingLoadDone()) {
             log.debug("Skip getScheduledMessages to wait for bucket snapshot load finish");
-            return Collections.emptyNavigableSet();
+            return new TreeSet<>();
         }
 
         long cutoffTime = getCutoffTime();
@@ -772,8 +775,15 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
 
         lastMutableBucket.moveScheduledMessageToSharedQueue(cutoffTime, sharedBucketPriorityQueue);
 
-        // Only loaded segments are deliverable, so arm the loads for every segment that is due now.
+        // Only loaded segments are deliverable, so arm the loads for every segment that is due
+        // now. If any load is (still) in flight, deliver nothing this round: once the batch
+        // settles, the re-triggered round sees every source due at this cutoff in the shared
+        // queue and returns them position-ordered.
         loadDueSegments(cutoffTime);
+        if (!checkPendingLoadDone()) {
+            updateTimer();
+            return new TreeSet<>();
+        }
 
         NavigableSet<Position> positions = new TreeSet<>();
         int n = maxMessages;
@@ -811,12 +821,13 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
     }
 
     /**
-     * Loads the next segment of every bucket whose earliest unloaded timestamp is due. At most one
-     * BookKeeper read is in flight at a time ({@code pendingLoad}); its completion re-triggers a
-     * dispatch round, so remaining due buckets are loaded in subsequent rounds. Segments of a
-     * bucket whose snapshot creation has not completed yet are served from the resident in-memory
-     * segment list synchronously — there is no durable copy to read yet, and delivery must not
-     * wait for the persistence to finish.
+     * Loads the next segment of every bucket whose earliest unloaded timestamp is due. All due
+     * loads are armed together and {@link #getScheduledMessages} only delivers once the whole
+     * batch settles: every source due at the same cutoff is then present in the shared queue, so
+     * the positions a dispatch round returns keep their order even when some of them had to be
+     * fetched from BookKeeper first. Segments of a bucket whose snapshot creation has not
+     * completed yet are served from the resident in-memory segment list synchronously — there is
+     * no durable copy to read yet, and delivery must not wait for the persistence to finish.
      *
      * <p>Buckets whose segments are all loaded are checked for being drained; a drained bucket's
      * snapshot is deleted here (replacing the former "terminal segment load" cleanup, which no
@@ -834,10 +845,6 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
         // Copy: segment loads may complete inline against the mock storage and delete a drained
         // bucket from the range map during the iteration.
         for (ImmutableBucket bucket : new ArrayList<>(immutableBuckets.asMapOfRanges().values())) {
-            if (!checkPendingLoadDone()) {
-                // A segment load is still in flight; its completion re-triggers the next round.
-                return;
-            }
             long nextUnloadedSegmentTimestamp = bucket.getNextUnloadedSegmentTimestamp();
             if (nextUnloadedSegmentTimestamp < 0) {
                 maybeDeleteDrainedBucket(bucket);
@@ -875,12 +882,12 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
             long loadStartTime = System.currentTimeMillis();
             stats.recordTriggerEvent(BucketDelayedMessageIndexStats.Type.load);
             final int segmentEntryId = bucket.getCurrentSegmentEntryId() + 1;
-            CompletableFuture<Void> loadFuture = pendingLoad = bucket.asyncLoadNextBucketSnapshotEntry()
+            CompletableFuture<Void> loadFuture = bucket.asyncLoadNextBucketSnapshotEntry()
                     .thenAccept(indexList -> {
                         synchronized (BucketDelayedDeliveryTracker.this) {
                             if (CollectionUtils.isEmpty(indexList)) {
                                 removeBucket(Range.closed(bucket.getStartLedgerId(), bucket.getEndLedgerId()));
-                                // Don't hold pendingLoad (and so delivery) on the delete; clear() waits for it.
+                                // Don't hold delivery on the delete; clear() waits for it.
                                 trackDelete(bucket, bucket.asyncDeleteBucketSnapshot(stats));
                                 return;
                             }
@@ -909,9 +916,11 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                                     System.currentTimeMillis() - loadStartTime);
                         }
                     });
-            // Once the load is done, start the next dispatch round: the loaded messages can already be due, and the
-            // timer would only run at its next tick. Not from the callback above, as the round could then run
-            // before the load completes, and skip. A failed load is retried at the timer's next tick.
+            pendingLoads.add(loadFuture);
+            // Once the load is done, start the next dispatch round: the loaded messages can
+            // already be due, and the timer would only run at its next tick. Not from the
+            // callback above, as the round could then run before the load completes, and skip.
+            // A failed load is retried at the timer's next tick.
             loadFuture.whenComplete((__, ex) -> {
                 if (ex != null) {
                     rescheduleTimer(0);
@@ -919,12 +928,6 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                     context.triggerReadMoreEntries();
                 }
             });
-            if (!checkPendingLoadDone() || loadFuture.isCompletedExceptionally()) {
-                // The load is still in flight (or failed): stop here. A successful completion
-                // re-triggers a dispatch round; a failure is retried at the timer's next tick.
-                return;
-            }
-            // Completed synchronously (e.g. in-memory storage): keep loading in this round.
         }
     }
 
@@ -953,11 +956,8 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
     }
 
     private synchronized boolean checkPendingLoadDone() {
-        if (pendingLoad == null || pendingLoad.isDone()) {
-            pendingLoad = null;
-            return true;
-        }
-        return false;
+        pendingLoads.removeIf(CompletableFuture::isDone);
+        return pendingLoads.isEmpty();
     }
 
     private synchronized CompletableFuture<Void> keepUncleaned(List<ImmutableBucket> buckets) {
@@ -1003,8 +1003,8 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                 .thenCompose(__ -> {
                     List<CompletableFuture<?>> pending = new ArrayList<>();
                     synchronized (BucketDelayedDeliveryTracker.this) {
-                        if (pendingLoad != null) {
-                            pending.add(pendingLoad);
+                        if (!pendingLoads.isEmpty()) {
+                            pending.addAll(pendingLoads);
                         }
                         pending.addAll(pendingDeletes);
                     }

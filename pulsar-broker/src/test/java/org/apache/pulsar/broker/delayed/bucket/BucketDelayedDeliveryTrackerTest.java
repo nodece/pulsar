@@ -44,6 +44,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
@@ -1424,8 +1425,10 @@ public class BucketDelayedDeliveryTrackerTest extends AbstractDeliveryTrackerTes
                 producer.close();
             }
 
-            // The snapshot delete succeeds but every property-removal attempt hits BadVersion, so only
-            // the cursor property is left behind.
+            // The snapshot delete succeeds but the property-removal attempts hit BadVersion first.
+            // The drained-bucket cleanup is retried from every dispatch round, so a later retry
+            // consumes the failures and removes the residual property without waiting for the
+            // tracker to be recreated.
             String bucketKey = BucketDelayedDeliveryTracker.DELAYED_BUCKET_KEY_PREFIX + "_1_5";
             BucketDelayedDeliveryTracker tracker = new BucketDelayedDeliveryTracker(
                     testDispatcher, timer, 100000, testClock, true, storage,
@@ -1434,10 +1437,11 @@ public class BucketDelayedDeliveryTrackerTest extends AbstractDeliveryTrackerTes
                 testClockTime.set(1000);
                 Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
                     tracker.getScheduledMessages(10);
-                    assertTrue(propertyRemoveCalls.get() >= 4);
+                    assertTrue(propertyRemoveCalls.get() >= 5,
+                            "4 injected failures consumed plus one successful removal");
+                    assertFalse(cursor.getCursorProperties().containsKey(bucketKey));
                 });
-                assertTrue(cursor.getCursorProperties().containsKey(bucketKey),
-                        "The property should survive the failed removal");
+                assertEquals(tracker.getImmutableBuckets().asMapOfRanges().size(), 0);
             } finally {
                 tracker.close();
             }
@@ -2196,23 +2200,23 @@ public class BucketDelayedDeliveryTrackerTest extends AbstractDeliveryTrackerTes
             // delivers the in-memory message; the loaded segment's messages must be dispatched
             // without waiting for the timer.
             testClockTime.set(1000);
-            // A triggered dispatch round can run at once: run the first one right away, and keep what it gets
-            AtomicBoolean roundTriggered = new AtomicBoolean();
-            CompletableFuture<NavigableSet<Position>> firstRound = new CompletableFuture<>();
+            // Triggered dispatch rounds can run at once: collect what they deliver. With batch
+            // loading one round may still be arming further due segments, so accumulate.
+            List<Position> triggeredDeliveries = Collections.synchronizedList(new ArrayList<>());
             doAnswer(invocation -> {
-                if (roundTriggered.compareAndSet(false, true)) {
-                    firstRound.complete(tracker.getScheduledMessages(10));
-                }
+                triggeredDeliveries.addAll(tracker.getScheduledMessages(10));
                 return null;
             }).when(testDispatcher).readMoreEntriesAsync();
-            // The snapshot segment read is still gated, so this round only delivers the mutable
-            // message; the segment load stays pending.
+            // The snapshot segment read is still gated, so this round arms the load and delivers
+            // nothing: the batch gate holds the mutable message back too, so a load-triggered
+            // round returns both sources position-ordered.
             NavigableSet<Position> firstScheduled = tracker.getScheduledMessages(10);
-            assertEquals(firstScheduled.size(), 1);
-            assertThat(firstScheduled).containsExactly(PositionFactory.create(6, 6));
+            assertEquals(firstScheduled.size(), 0);
             segmentReads.complete(null);
-            // The round that the load triggers gets the segment's message
-            assertThat(firstRound.get(10, TimeUnit.SECONDS)).contains(PositionFactory.create(1, 1));
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+                assertThat(triggeredDeliveries).contains(PositionFactory.create(1, 1));
+                assertThat(triggeredDeliveries).contains(PositionFactory.create(6, 6));
+            });
 
             tracker.close();
         } finally {
