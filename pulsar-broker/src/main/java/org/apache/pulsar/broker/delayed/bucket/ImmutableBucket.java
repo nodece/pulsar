@@ -281,6 +281,15 @@ class ImmutableBucket {
     }
 
     /**
+     * Segments considered loaded for merge eligibility. A lazy bucket (no segment resident yet,
+     * {@code currentSegmentEntryId == 0}) counts as one loaded segment, so a single-segment
+     * bucket stays unmergeable exactly as with eager loading.
+     */
+    int mergeEligibilityLoadedSegments() {
+        return Math.max(currentSegmentEntryId, 1);
+    }
+
+    /**
      * Recover delayed index bit map and message numbers.
      */
     private void recoverDelayedIndexBitMapAndNumber(int startSnapshotIndex,

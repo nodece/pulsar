@@ -541,11 +541,9 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
             List<ImmutableBucket> immutableBuckets = values.subList(i, i + actualMergeNum);
             if (immutableBuckets.stream().allMatch(bucket -> {
                 // We should skip the bucket which last segment already been load to memory,
-                // avoid record replicated index. A lazy bucket (no segment loaded yet,
-                // currentSegmentEntryId == 0) counts as if its first segment were loaded, so a
-                // single-segment bucket stays unmergeable exactly as with eager loading.
-                int loadedSegments = Math.max(bucket.getCurrentSegmentEntryId(), 1);
-                return bucket.getLastSegmentEntryId() > loadedSegments && !bucket.merging;
+                // avoid record replicated index.
+                return bucket.getLastSegmentEntryId() > bucket.mergeEligibilityLoadedSegments()
+                        && !bucket.merging;
             })) {
                 long numberMessages = immutableBuckets.stream()
                         .mapToLong(bucket -> bucket.getNumberBucketDelayedMessages())
@@ -728,14 +726,17 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
         return timestamp;
     }
 
-    /** Sentinel for {@link #cachedMinUnloadedSegmentTimestamp}: must be recomputed. */
-    private static final long MIN_UNLOADED_DIRTY = -2;
+    /** Sentinel for {@link #cachedMinUnloadedSegmentTimestamp}: the cache must be recomputed. */
+    private static final long MIN_UNLOADED_DIRTY = Long.MIN_VALUE;
+
+    /** Sentinel for the minimum itself: every segment of every bucket is loaded. */
+    private static final long MIN_UNLOADED_NONE = -1;
 
     private long cachedMinUnloadedSegmentTimestamp = MIN_UNLOADED_DIRTY;
 
     private long minUnloadedSegmentTimestamp() {
         if (cachedMinUnloadedSegmentTimestamp == MIN_UNLOADED_DIRTY) {
-            long min = -1;
+            long min = MIN_UNLOADED_NONE;
             for (ImmutableBucket bucket : immutableBuckets.asMapOfRanges().values()) {
                 long nextUnloadedSegmentTimestamp = bucket.getNextUnloadedSegmentTimestamp();
                 if (nextUnloadedSegmentTimestamp >= 0
@@ -849,85 +850,103 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                 maybeDeleteDrainedBucket(bucket);
                 continue;
             }
-            if (nextUnloadedSegmentTimestamp > cutoffTime) {
+            if (nextUnloadedSegmentTimestamp > cutoffTime || bucket.merging) {
+                // Not due yet, or the merged bucket owns the segment chain until the merge settles.
                 continue;
             }
-            if (bucket.merging) {
-                // Retried once the merge settles: the merged bucket owns the segment chain.
-                continue;
-            }
-
-            List<SnapshotSegment> residentSegments = bucket.getSnapshotSegments().orElse(null);
-            if (residentSegments != null) {
-                // Snapshot creation still in flight: the resident list still holds every segment.
-                int nextSegmentId = bucket.getCurrentSegmentEntryId() + 1;
-                SnapshotSegment segment = residentSegments.get(nextSegmentId - 1);
-                bucket.setCurrentSegmentEntryId(nextSegmentId);
-                invalidateMinUnloadedSegmentTimestamp();
-                for (DelayedIndex delayedIndex : segment.getIndexesList()) {
-                    sharedBucketPriorityQueue.add(delayedIndex.getTimestamp(), delayedIndex.getLedgerId(),
-                            delayedIndex.getEntryId());
-                }
-                continue;
-            }
-
-            if (!bucket.getSnapshotCreateFuture().orElse(NULL_LONG_PROMISE).isDone()) {
-                log.info()
-                        .attr("bucketKey", bucket.bucketKey())
-                        .log("Skip load to wait for bucket snapshot create finish");
-                continue;
-            }
-
-            long loadStartTime = System.currentTimeMillis();
-            stats.recordTriggerEvent(BucketDelayedMessageIndexStats.Type.load);
-            final int segmentEntryId = bucket.getCurrentSegmentEntryId() + 1;
-            CompletableFuture<Void> loadFuture = bucket.asyncLoadNextBucketSnapshotEntry()
-                    .thenAccept(indexList -> {
-                        synchronized (BucketDelayedDeliveryTracker.this) {
-                            if (CollectionUtils.isEmpty(indexList)) {
-                                removeBucket(Range.closed(bucket.getStartLedgerId(), bucket.getEndLedgerId()));
-                                // Don't hold delivery on the delete; clear() waits for it.
-                                trackDelete(bucket, bucket.asyncDeleteBucketSnapshot(stats));
-                                return;
-                            }
-                            for (DelayedIndex index : indexList) {
-                                sharedBucketPriorityQueue.add(index.getTimestamp(), index.getLedgerId(),
-                                        index.getEntryId());
-                            }
-                            invalidateMinUnloadedSegmentTimestamp();
-                        }
-                    }).whenComplete((__, ex) -> {
-                        if (ex != null) {
-                            log.error()
-                                    .attr("bucketKey", bucket.bucketKey())
-                                    .attr("segmentEntryId", segmentEntryId)
-                                    .exception(ex)
-                                    .log("Failed to load bucket snapshot segment");
-
-                            stats.recordFailEvent(BucketDelayedMessageIndexStats.Type.load);
-                        } else {
-                            log.info()
-                                    .attr("bucketKey", bucket.bucketKey())
-                                    .attr("segmentEntryId", segmentEntryId)
-                                    .log("Load next bucket snapshot segment finish");
-
-                            stats.recordSuccessEvent(BucketDelayedMessageIndexStats.Type.load,
-                                    System.currentTimeMillis() - loadStartTime);
-                        }
-                    });
-            pendingLoads.add(loadFuture);
-            // Once the load is done, start the next dispatch round: the loaded messages can
-            // already be due, and the timer would only run at its next tick. Not from the
-            // callback above, as the round could then run before the load completes, and skip.
-            // A failed load is retried at the timer's next tick.
-            loadFuture.whenComplete((__, ex) -> {
-                if (ex != null) {
-                    rescheduleTimer(0);
-                } else {
-                    context.triggerReadMoreEntries();
-                }
-            });
+            loadNextSegment(bucket);
         }
+    }
+
+    /**
+     * Makes the next unloaded segment of the bucket deliverable. Storage reads are armed without
+     * waiting: every due bucket gets its load in this round, and the completion of the batch
+     * re-triggers the dispatch rounds.
+     */
+    private void loadNextSegment(ImmutableBucket bucket) {
+        List<SnapshotSegment> residentSegments = bucket.getSnapshotSegments().orElse(null);
+        if (residentSegments != null) {
+            serveResidentSegment(bucket, residentSegments);
+            return;
+        }
+
+        if (!bucket.getSnapshotCreateFuture().orElse(NULL_LONG_PROMISE).isDone()) {
+            log.info()
+                    .attr("bucketKey", bucket.bucketKey())
+                    .log("Skip load to wait for bucket snapshot create finish");
+            return;
+        }
+
+        loadSegmentFromStorage(bucket);
+    }
+
+    /**
+     * Serves the next segment from the resident in-memory list while the snapshot creation is
+     * still in flight: there is no durable copy to read yet, and delivery must not wait for the
+     * persistence to finish.
+     */
+    private void serveResidentSegment(ImmutableBucket bucket, List<SnapshotSegment> residentSegments) {
+        int nextSegmentId = bucket.getCurrentSegmentEntryId() + 1;
+        SnapshotSegment segment = residentSegments.get(nextSegmentId - 1);
+        bucket.setCurrentSegmentEntryId(nextSegmentId);
+        invalidateMinUnloadedSegmentTimestamp();
+        for (DelayedIndex delayedIndex : segment.getIndexesList()) {
+            sharedBucketPriorityQueue.add(delayedIndex.getTimestamp(), delayedIndex.getLedgerId(),
+                    delayedIndex.getEntryId());
+        }
+    }
+
+    /** Fetches the next segment from storage and queues its indexes when the read completes. */
+    private void loadSegmentFromStorage(ImmutableBucket bucket) {
+        long loadStartTime = System.currentTimeMillis();
+        stats.recordTriggerEvent(BucketDelayedMessageIndexStats.Type.load);
+        final int segmentEntryId = bucket.getCurrentSegmentEntryId() + 1;
+        CompletableFuture<Void> loadFuture = bucket.asyncLoadNextBucketSnapshotEntry()
+                .thenAccept(indexList -> {
+                    synchronized (BucketDelayedDeliveryTracker.this) {
+                        if (CollectionUtils.isEmpty(indexList)) {
+                            removeBucket(Range.closed(bucket.getStartLedgerId(), bucket.getEndLedgerId()));
+                            // Don't hold delivery on the delete; clear() waits for it.
+                            trackDelete(bucket, bucket.asyncDeleteBucketSnapshot(stats));
+                            return;
+                        }
+                        for (DelayedIndex index : indexList) {
+                            sharedBucketPriorityQueue.add(index.getTimestamp(), index.getLedgerId(),
+                                    index.getEntryId());
+                        }
+                        invalidateMinUnloadedSegmentTimestamp();
+                    }
+                }).whenComplete((__, ex) -> {
+                    if (ex != null) {
+                        log.error()
+                                .attr("bucketKey", bucket.bucketKey())
+                                .attr("segmentEntryId", segmentEntryId)
+                                .exception(ex)
+                                .log("Failed to load bucket snapshot segment");
+
+                        stats.recordFailEvent(BucketDelayedMessageIndexStats.Type.load);
+                    } else {
+                        log.info()
+                                .attr("bucketKey", bucket.bucketKey())
+                                .attr("segmentEntryId", segmentEntryId)
+                                .log("Load next bucket snapshot segment finish");
+
+                        stats.recordSuccessEvent(BucketDelayedMessageIndexStats.Type.load,
+                                System.currentTimeMillis() - loadStartTime);
+                    }
+                });
+        pendingLoads.add(loadFuture);
+        // Once the load is done, start the next dispatch round: the loaded messages can already
+        // be due, and the timer would only run at its next tick. Not from the callback above, as
+        // the round could then run before the load completes, and skip. A failed load is retried
+        // at the timer's next tick.
+        loadFuture.whenComplete((__, ex) -> {
+            if (ex != null) {
+                rescheduleTimer(0);
+            } else {
+                context.triggerReadMoreEntries();
+            }
+        });
     }
 
     /**
