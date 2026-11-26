@@ -1674,6 +1674,15 @@ public class ServiceConfiguration implements PulsarConfiguration {
     private boolean dispatcherDispatchMessagesInSubscriptionThread = false;
 
     @FieldContext(
+            category = CATEGORY_SERVER,
+            doc = "The longest a normal read may be postponed by pending replays (redeliveries and due delayed"
+                    + " messages), in milliseconds. Replays go before normal reads; when replays keep a subscription"
+                    + " busy for longer than this while entries are waiting to be read, the next scheduling round"
+                    + " reads from the cursor instead, so fresh entries are not starved by a redelivery storm."
+                    + " 0 disables the bound: replays always go first.")
+    private int dispatcherMaxNormalReadDelayInMillis = 100;
+
+    @FieldContext(
         dynamic = false,
         category = CATEGORY_SERVER,
         doc = "Whether the broker should count filtered entries in dispatch rate limit calculations. When disabled, "
