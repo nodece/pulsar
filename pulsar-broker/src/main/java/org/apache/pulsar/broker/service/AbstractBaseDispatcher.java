@@ -260,7 +260,8 @@ public abstract class AbstractBaseDispatcher extends EntryFilterSupport implemen
                             Collections.emptyMap());
                     continue;
                 }
-            } else if (trackDelayedDelivery(entry.getLedgerId(), entry.getEntryId(), msgMetadata)) {
+            } else if (trackDelayedDelivery(entry.getLedgerId(), entry.getEntryId(), msgMetadata,
+                    metadataAndPayload)) {
                 // The message is marked for delayed delivery. Ignore for now.
                 entries.set(i, null);
                 entry.release();

@@ -42,6 +42,21 @@ public interface DelayedDeliveryTracker extends AutoCloseable {
     boolean addMessage(long ledgerId, long entryId, long deliveryAt);
 
     /**
+     * Add a message to the tracker together with its serialized entry data. Called from the same
+     * place as {@link #addMessage(long, long, long)} when the broker still holds the entry buffer;
+     * the default implementation ignores the data, so only trackers that store a copy of the
+     * message (e.g. a journaling bucket tracker) pay for it.
+     *
+     * @param ledgerId   the ledgerId of the entry in the data ledger
+     * @param entryId    the entryId of the entry in the data ledger
+     * @param deliveryAt the absolute timestamp at which the message should be delivered
+     * @param entryData  the serialized entry (metadata and payload), read-only
+     */
+    default void addEntry(long ledgerId, long entryId, long deliveryAt, io.netty.buffer.ByteBuf entryData) {
+        // No-op: trackers that don't store message copies don't need the data.
+    }
+
+    /**
      * Return true if there's at least a message that is scheduled to be delivered already.
      */
     boolean hasMessageAvailable();

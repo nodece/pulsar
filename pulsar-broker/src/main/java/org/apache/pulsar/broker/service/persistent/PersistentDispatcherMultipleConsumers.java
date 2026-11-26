@@ -1478,6 +1478,20 @@ public class PersistentDispatcherMultipleConsumers extends AbstractPersistentDis
     }
 
     @Override
+    public boolean trackDelayedDelivery(long ledgerId, long entryId, MessageMetadata msgMetadata,
+            io.netty.buffer.ByteBuf entryData) {
+        boolean tracked = trackDelayedDelivery(ledgerId, entryId, msgMetadata);
+        if (tracked) {
+            Optional<DelayedDeliveryTracker> tracker = delayedDeliveryTracker;
+            if (tracker.isPresent()) {
+                long deliverAtTime = msgMetadata.hasDeliverAtTime() ? msgMetadata.getDeliverAtTime() : -1L;
+                tracker.get().addEntry(ledgerId, entryId, deliverAtTime, entryData);
+            }
+        }
+        return tracked;
+    }
+
+    @Override
     public boolean trackDelayedDelivery(long ledgerId, long entryId, MessageMetadata msgMetadata) {
         if (!topic.isDelayedDeliveryEnabled()) {
             // If broker has the feature disabled, always deliver messages immediately
