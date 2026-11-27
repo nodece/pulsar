@@ -24,6 +24,7 @@ import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.NavigableSet;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.LongAdder;
 import lombok.CustomLog;
 import org.apache.bookkeeper.mledger.AsyncCallbacks;
@@ -212,6 +213,22 @@ public class JournalingBucketDelayedDeliveryTracker extends BucketDelayedDeliver
     private static void complete(List<Entry> entries, AsyncCallbacks.ReadEntriesCallback callback,
             Object ctx) {
         callback.readEntriesComplete(entries, ctx);
+    }
+
+    /**
+     * Also deletes the journal ledgers: the inherited clear empties the index and the bucket
+     * snapshots, and the journal copies are equally stale after a reset. The drain state goes
+     * with them, so the next rounds journal and drain from scratch.
+     */
+    @Override
+    public synchronized CompletableFuture<Void> clear() {
+        return super.clear().thenCompose(__ -> {
+            JournalStorage storage = journalStorage;
+            if (storage == null) {
+                return CompletableFuture.completedFuture(null);
+            }
+            return storage.deleteAll();
+        });
     }
 
     long journaledEntries() {

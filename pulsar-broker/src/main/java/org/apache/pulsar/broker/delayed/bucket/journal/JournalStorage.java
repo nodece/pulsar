@@ -132,14 +132,22 @@ class JournalStorage {
      */
     synchronized CompletableFuture<List<JournalRecord>> readDue(long cutoffTime, int maxRecords) {
         List<CompletableFuture<List<JournalRecord>>> drains = new ArrayList<>();
+        List<Long> expiredLedgers = new ArrayList<>();
         // Window order: earlier windows first, then the current one.
         new TreeMap<>(windowLedgers).forEach((window, ledger) -> {
             if (window > cutoffTime) {
                 return; // a future window: nothing in it can be due
             }
             Long offset = drainOffsets.computeIfAbsent(ledger.getId(), id -> 0L);
-            if (offset > ledger.getLastAddConfirmed()) {
-                return; // fully drained
+            boolean fullyDrained = offset > ledger.getLastAddConfirmed();
+            boolean windowExpired = window + WINDOW_MS <= cutoffTime;
+            if (fullyDrained) {
+                if (windowExpired) {
+                    // The window has passed and the drain is past its end: no future read can
+                    // come from this ledger. Delete it to reclaim the disk space.
+                    expiredLedgers.add(ledger.getId());
+                }
+                return;
             }
             long last = Math.min(offset + maxRecords - 1, ledger.getLastAddConfirmed());
             drains.add(readHandle(ledger.getId()).thenCompose(rh -> rh.readAsync(offset, last))
@@ -168,6 +176,9 @@ class JournalStorage {
                         return due;
                     }));
         });
+        for (Long ledgerId : expiredLedgers) {
+            removeWindowLedger(ledgerId);
+        }
         if (drains.isEmpty()) {
             return CompletableFuture.completedFuture(List.of());
         }
@@ -177,6 +188,35 @@ class JournalStorage {
                     drains.forEach(d -> all.addAll(d.join()));
                     return all;
                 });
+    }
+
+    /** Removes a fully-drained, expired window ledger from the maps and deletes it from BK. */
+    private void removeWindowLedger(long ledgerId) {
+        windowLedgers.entrySet().removeIf(e -> e.getValue().getId() == ledgerId);
+        drainOffsets.remove(ledgerId);
+        ledgerEntryCounts.remove(ledgerId);
+        bookKeeper.newDeleteLedgerOp().withLedgerId(ledgerId).execute()
+                .whenComplete((__, ex) -> {
+                    if (ex != null) {
+                        log.warn().attr("ledgerId", ledgerId).exceptionMessage(ex)
+                                .log("Failed to delete the drained journal ledger;"
+                                        + " it will be retried after the next restart");
+                    }
+                });
+    }
+
+    /** Deletes every journal ledger, used by clear and close. */
+    CompletableFuture<Void> deleteAll() {
+        List<Long> ledgerIds = new ArrayList<>(windowLedgers.values().stream().map(WriteHandle::getId).toList());
+        windowLedgers.clear();
+        drainOffsets.clear();
+        ledgerEntryCounts.clear();
+        List<CompletableFuture<Void>> deletes = new ArrayList<>();
+        for (Long ledgerId : ledgerIds) {
+            deletes.add(bookKeeper.newDeleteLedgerOp().withLedgerId(ledgerId).execute()
+                    .thenApply(__ -> null));
+        }
+        return CompletableFuture.allOf(deletes.toArray(new CompletableFuture[0]));
     }
 
     private CompletableFuture<WriteHandle> newLedger() {
@@ -217,18 +257,15 @@ class JournalStorage {
     }
 
     CompletableFuture<Void> close() {
-        List<CompletableFuture<Void>> closes = new ArrayList<>();
-        windowLedgers.values().forEach(lh -> closes.add(lh.closeAsync()));
-        windowLedgers.clear();
-        drainOffsets.clear();
-        ledgerEntryCounts.clear();
-        return CompletableFuture.allOf(closes.toArray(new CompletableFuture[0]))
-                .whenComplete((__, ex) -> {
-                    try {
-                        bookKeeper.close();
-                    } catch (Exception e) {
-                        log.warn().exceptionMessage(e).log("Failed to close the journal BookKeeper client");
-                    }
-                });
+        return deleteAll().whenComplete((__, ex) -> {
+            if (ex != null) {
+                log.warn().exceptionMessage(ex).log("Failed to delete the journal ledgers on close");
+            }
+            try {
+                bookKeeper.close();
+            } catch (Exception e) {
+                log.warn().exceptionMessage(e).log("Failed to close the journal BookKeeper client");
+            }
+        });
     }
 }
