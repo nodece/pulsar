@@ -128,6 +128,19 @@ public interface Dispatcher {
         return false;
     }
 
+    /**
+     * Same as {@link #trackDelayedDelivery(long, long, MessageMetadata)}, with the serialized entry
+     * data handed to the tracker: a tracker that stores message copies uses it to take the copy at
+     * the only point where the broker holds the buffer. The base implementations forward to the
+     * three-argument variant, so the copy is opt-in per tracker.
+     *
+     * @return true if the message should be delayed and ignored at this point
+     */
+    default boolean trackDelayedDelivery(long ledgerId, long entryId, MessageMetadata msgMetadata,
+            io.netty.buffer.ByteBuf entryData) {
+        return trackDelayedDelivery(ledgerId, entryId, msgMetadata);
+    }
+
     default long getNumberOfDelayedMessages() {
         return 0;
     }

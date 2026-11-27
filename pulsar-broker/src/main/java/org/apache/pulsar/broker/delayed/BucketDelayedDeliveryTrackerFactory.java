@@ -47,21 +47,21 @@ import org.apache.pulsar.common.util.FutureUtil;
 public class BucketDelayedDeliveryTrackerFactory implements DelayedDeliveryTrackerFactory {
     private static final int MaxRetryTimes = 3;
 
-    BucketSnapshotStorage bucketSnapshotStorage;
+    protected BucketSnapshotStorage bucketSnapshotStorage;
 
-    private Timer timer;
+    protected Timer timer;
 
-    private long tickTimeMillis;
+    protected long tickTimeMillis;
 
-    private boolean isDelayedDeliveryDeliverAtTimeStrict;
+    protected boolean isDelayedDeliveryDeliverAtTimeStrict;
 
-    private int delayedDeliveryMaxNumBuckets;
+    protected int delayedDeliveryMaxNumBuckets;
 
-    private long delayedDeliveryMinIndexCountPerBucket;
+    protected long delayedDeliveryMinIndexCountPerBucket;
 
-    private int delayedDeliveryMaxTimeStepPerBucketSnapshotSegmentSeconds;
+    protected int delayedDeliveryMaxTimeStepPerBucketSnapshotSegmentSeconds;
 
-    private int delayedDeliveryMaxIndexesPerBucketSnapshotSegment;
+    protected int delayedDeliveryMaxIndexesPerBucketSnapshotSegment;
 
     @Override
     public void initialize(PulsarService pulsarService) throws Exception {
@@ -129,7 +129,7 @@ public class BucketDelayedDeliveryTrackerFactory implements DelayedDeliveryTrack
     }
 
     @VisibleForTesting
-    BucketDelayedDeliveryTracker newTracker0(AbstractPersistentDispatcherMultipleConsumers dispatcher)
+    protected BucketDelayedDeliveryTracker newTracker0(AbstractPersistentDispatcherMultipleConsumers dispatcher)
             throws RecoverDelayedDeliveryTrackerException {
         return new BucketDelayedDeliveryTracker(new DispatcherDelayedDeliveryContext(dispatcher), timer,
                 tickTimeMillis, Clock.systemUTC(), isDelayedDeliveryDeliverAtTimeStrict,

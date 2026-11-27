@@ -56,6 +56,7 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.delayed.BucketDelayedDeliveryTrackerFactory;
 import org.apache.pulsar.broker.delayed.DelayedDeliveryTracker;
+import org.apache.pulsar.broker.delayed.DueEntryReader;
 import org.apache.pulsar.broker.delayed.DelayedDeliveryTrackerFactory;
 import org.apache.pulsar.broker.delayed.InMemoryDelayedDeliveryTracker;
 import org.apache.pulsar.broker.delayed.bucket.BucketDelayedDeliveryTracker;
@@ -439,8 +440,28 @@ public class PersistentDispatcherMultipleConsumers extends AbstractPersistentDis
                 return;
             }
 
+            // A journaling delayed tracker drives its own dispatch round: the journal drain and
+            // the data-ledger fallback merge inside readDueAndReplay and complete through the same
+            // read callback, so the scheduling below stays on the regular path.
+            Optional<DelayedDeliveryTracker> tracker = delayedDeliveryTracker;
+            if (canReplayMessages() && tracker.isPresent()
+                    && tracker.get() instanceof DueEntryReader entryReader) {
+                boolean journalReadStarted = false;
+                try {
+                    updateMinReplayedPosition();
+                    onReadStarted(ReadType.Replay);
+                    journalReadStarted = true;
+                    havePendingReplayRead = true;
+                    entryReader.readDueEntries(this, null, messagesToRead);
+                } catch (Throwable failure) {
+                    handleReadSchedulingFailure(failure, ReadType.Replay, journalReadStarted);
+                    return;
+                }
+                return;
+            }
+
             Set<Position> messagesToReplayNow =
-                    canReplayMessages() ? getMessagesToReplayNow(messagesToRead, bytesToRead) : Collections.emptySet();
+                    canReplayMessages() ? getMessagesToPlayNowCompat(messagesToRead, bytesToRead) : Collections.emptySet();
             if (!messagesToReplayNow.isEmpty()) {
                 log.debug()
                         .attr("messagesToReplay", messagesToReplayNow.size())
@@ -1475,6 +1496,25 @@ public class PersistentDispatcherMultipleConsumers extends AbstractPersistentDis
             return true;
         }
         return false;
+    }
+
+    /** Delegates to {@link #getMessagesToReplayNow(int, long)}; kept for the journaling branch. */
+    private Set<Position> getMessagesToPlayNowCompat(int messagesToRead, long bytesToRead) {
+        return getMessagesToReplayNow(messagesToRead, bytesToRead);
+    }
+
+    @Override
+    public boolean trackDelayedDelivery(long ledgerId, long entryId, MessageMetadata msgMetadata,
+            io.netty.buffer.ByteBuf entryData) {
+        boolean tracked = trackDelayedDelivery(ledgerId, entryId, msgMetadata);
+        if (tracked) {
+            Optional<DelayedDeliveryTracker> tracker = delayedDeliveryTracker;
+            if (tracker.isPresent()) {
+                long deliverAtTime = msgMetadata.hasDeliverAtTime() ? msgMetadata.getDeliverAtTime() : -1L;
+                tracker.get().addEntry(ledgerId, entryId, deliverAtTime, entryData);
+            }
+        }
+        return tracked;
     }
 
     @Override
