@@ -26,8 +26,11 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import lombok.CustomLog;
 import org.apache.bookkeeper.client.api.DigestType;
@@ -49,6 +52,23 @@ import org.apache.pulsar.broker.service.persistent.PersistentTopic;
  * as its messageId. A timer drains the due entries and rewrites each one to the data ledger's
  * tail via the topic's normal publish path; the consumer sees the rewritten entry at its tail
  * position. The delay-storage window ledgers are deleted after they expire and drain.
+ *
+ * <p>The drain is driven by an exact-due timer modeled on the tracker timer
+ * ({@code AbstractDelayedDeliveryTracker.updateTimer()}): the earliest known {@code deliverAt}
+ * arms a one-shot timeout, an append that moves it earlier re-arms the timeout, and a completed
+ * round recomputes it from what the drain saw (the held-back record, the future windows, the
+ * batch truncation) — there is no fixed-rate polling. The firing rate is floored at one
+ * {@code tickTimeMillis} per round, so a backlog that cannot drain in a single round retries on
+ * successive ticks instead of hot-looping. A hashed timing wheel (Varghese &amp; Lauck, SOSP'87)
+ * earns its complexity with many concurrent timeouts; this router holds one per topic, where a
+ * precise one-shot schedule is both simpler and more accurate than a wheel rounded to its tick
+ * duration.
+ *
+ * <p>Within a window the drain follows arrival order and holds at the first record that is not
+ * due yet, so a not-due record that arrived before an already-due one delays that delivery
+ * until it becomes due — the lateness is bounded by the window width. Skipping past the head
+ * would need a per-entry rewrite index and re-reads of the held prefix every round, which is
+ * the very index this write-routing design exists to avoid.
  */
 @CustomLog
 public final class TopicDelayRouter implements AutoCloseable {
@@ -77,6 +97,36 @@ public final class TopicDelayRouter implements AutoCloseable {
 
     private final AtomicBoolean closed = new AtomicBoolean(false);
 
+    private final ScheduledExecutorService executor;
+
+    /**
+     * Earliest known {@code deliverAt} among routed-but-unrewritten entries;
+     * {@link Long#MAX_VALUE} when nothing is pending. Lowered at append time (before the BK
+     * write completes — delivery must not wait for the ack) and recomputed at the end of every
+     * drain round; see {@link #recomputeNextDeliverAt(long, long, long)}.
+     */
+    private final AtomicLong nextDeliverAt = new AtomicLong(Long.MAX_VALUE);
+
+    /**
+     * Bumped when a routed append becomes visible to drains (its BK write completes); lets a
+     * drain round tell whether its recompute raced an append.
+     */
+    private final AtomicLong appendVersion = new AtomicLong();
+
+    /** Serializes drain rounds so one round's callbacks cannot interleave another's. */
+    private final AtomicBoolean drainInFlight = new AtomicBoolean(false);
+
+    /**
+     * Guards the timer state below. A leaf lock: no router method is invoked while holding it,
+     * mirroring {@code AbstractDelayedDeliveryTracker}'s timeoutLock.
+     */
+    private final Object timerLock = new Object();
+
+    private ScheduledFuture<?> armedTimer;        // Guarded by timerLock
+    private long currentTarget = Long.MAX_VALUE;  // Guarded by timerLock
+    private long lastFireAt;                      // Guarded by timerLock
+    private long timerGeneration;                 // Guarded by timerLock
+
     private final LongAdder routedEntries = new LongAdder();
     private final LongAdder rewrittenEntries = new LongAdder();
     private final LongAdder failedEntries = new LongAdder();
@@ -94,32 +144,93 @@ public final class TopicDelayRouter implements AutoCloseable {
         this.executor = pulsar.getExecutor();
     }
 
-    private final java.util.concurrent.ScheduledExecutorService executor;
-
-    /** Starts the due-rewrite timer. */
+    /** Arms the timer if any routed entry is already due. */
     public void start() {
-        scheduleDrain();
+        updateTimer();
     }
 
-    private void scheduleDrain() {
-        if (closed.get()) {
-            return;
+    /**
+     * Arms the timer to fire when {@link #nextDeliverAt} becomes due. Mirrors
+     * {@code AbstractDelayedDeliveryTracker.updateTimer()}: the timer is armed for the earliest
+     * known target, only re-armed when the target moves earlier, and never fires faster than one
+     * {@link #tickTimeMillis} after the last round.
+     */
+    private void updateTimer() {
+        long target = nextDeliverAt.get();
+        synchronized (timerLock) {
+            if (closed.get()) {
+                return;
+            }
+            if (armedTimer != null) {
+                if (target == currentTarget || currentTarget < target) {
+                    // Already armed at this target, or at an earlier one — an early round is a
+                    // harmless no-op followed by a recompute.
+                    return;
+                }
+                armedTimer.cancel(false);
+            }
+            if (target == Long.MAX_VALUE) {
+                currentTarget = Long.MAX_VALUE;
+                armedTimer = null;
+                return;
+            }
+            long now = System.currentTimeMillis();
+            long dueDelay = Math.max(0, target - now);
+            long tickFloor = Math.max(0, lastFireAt + tickTimeMillis - now);
+            currentTarget = target;
+            long generation = ++timerGeneration;
+            armedTimer = executor.schedule(() -> onTimer(generation),
+                    Math.max(dueDelay, tickFloor), TimeUnit.MILLISECONDS);
         }
-        executor.schedule(this::drainOnce, tickTimeMillis, TimeUnit.MILLISECONDS);
     }
 
-    private void drainOnce() {
-        if (closed.get()) {
+    /**
+     * A timer firing. Only the live generation proceeds: a timeout that raced its cancellation
+     * may still fire and must not clear the newer timer's state (as in upstream #25996).
+     */
+    private void onTimer(long generation) {
+        synchronized (timerLock) {
+            if (closed.get() || generation != timerGeneration) {
+                return;
+            }
+            armedTimer = null;
+            currentTarget = Long.MAX_VALUE;
+            lastFireAt = System.currentTimeMillis();
+        }
+        runDrain();
+    }
+
+    private void runDrain() {
+        if (closed.get() || !drainInFlight.compareAndSet(false, true)) {
+            // A round is already running; its completion re-arms the timer from a floor that is
+            // never later than this firing's target.
             return;
         }
-        rewriteDue().whenComplete((__, ex) -> {
+        CompletableFuture<Void> round;
+        try {
+            round = rewriteDue();
+        } catch (Throwable t) {
+            // A synchronous failure would otherwise leave the in-flight flag stuck and stall
+            // every later round.
+            drainInFlight.set(false);
+            log.warn()
+                    .attr("topic", topic.getName())
+                    .exceptionMessage(t)
+                    .log("Failed to start a rewrite round; retried on the next tick");
+            updateTimer();
+            return;
+        }
+        round.whenComplete((__, ex) -> {
+            drainInFlight.set(false);
             if (ex != null) {
                 log.warn()
                         .attr("topic", topic.getName())
                         .exceptionMessage(ex)
                         .log("Failed to rewrite due delayed entries; retried on the next tick");
             }
-            scheduleDrain();
+            // On failure the round floored the next due at its cutoff, so this arms the retry;
+            // on success it arms the recomputed target.
+            updateTimer();
         });
     }
 
@@ -128,6 +239,22 @@ public final class TopicDelayRouter implements AutoCloseable {
      * producer-visible messageId.
      */
     public CompletableFuture<long[]> append(long deliverAt, ByteBuf headersAndPayload) {
+        // Track the due time before the BK write: the timer must not wait for the ack, or the
+        // write's visibility gap would delay delivery.
+        nextDeliverAt.accumulateAndGet(deliverAt, Math::min);
+        updateTimer();
+        return route(deliverAt, headersAndPayload).whenComplete((position, ex) -> {
+            // The record is now visible to drains (or the write failed). Re-assert its due time —
+            // a round that completed during the write may have raised the floor past it — and
+            // publish the visibility version the recompute relies on. On failure this only buys
+            // an early no-op round; the next recompute raises the floor again.
+            nextDeliverAt.accumulateAndGet(deliverAt, Math::min);
+            appendVersion.incrementAndGet();
+            updateTimer();
+        });
+    }
+
+    private CompletableFuture<long[]> route(long deliverAt, ByteBuf headersAndPayload) {
         long window = windowOf(deliverAt);
         WriteHandle ledger = windowLedgers.get(window);
         if (ledger != null) {
@@ -159,18 +286,27 @@ public final class TopicDelayRouter implements AutoCloseable {
     /**
      * Drains the due entries and rewrites each one to the data ledger's tail. The drain reads
      * window ledgers sequentially and holds at the first record that is not due yet.
+     *
+     * <p>The round also recomputes the timer's next-due floor from what it saw: the held-back
+     * record's {@code deliverAt} (exact), the start of a future window (a lower bound for every
+     * record in it), and {@code cutoff + 1} when a window's drain was truncated by
+     * {@link #DRAIN_BATCH} with everything read already due.
      */
     public synchronized CompletableFuture<Void> rewriteDue() {
         if (closed.get()) {
             return CompletableFuture.completedFuture(null);
         }
+        long version = appendVersion.get();
         long cutoff = System.currentTimeMillis();
+        AtomicLong nextKnown = new AtomicLong(Long.MAX_VALUE);
         List<CompletableFuture<Void>> rewrites = new ArrayList<>();
         List<Long> expiredLedgers = new ArrayList<>();
 
         new TreeMap<>(windowLedgers).forEach((window, ledger) -> {
             if (window > cutoff) {
-                return; // a future window: nothing due
+                // A future window: its start lower-bounds every record in it.
+                nextKnown.accumulateAndGet(window, Math::min);
+                return;
             }
             Long offset = drainOffsets.computeIfAbsent(ledger.getId(), id -> 0L);
             if (offset > ledger.getLastAddConfirmed()) {
@@ -183,6 +319,7 @@ public final class TopicDelayRouter implements AutoCloseable {
             rewrites.add(readHandle(ledger.getId()).thenCompose(rh -> rh.readAsync(offset, last))
                     .thenAccept(entries -> {
                         long nextOffset = offset;
+                        boolean heldBack = false;
                         for (LedgerEntry e : entries) {
                             ByteBuf buf = e.getEntryBuffer();
                             ByteBuf body;
@@ -202,8 +339,17 @@ public final class TopicDelayRouter implements AutoCloseable {
                                 rewrittenEntries.increment();
                             } else {
                                 body.release();
-                                break; // not due yet: hold the drain here
+                                // Not due yet: this is the window's exact next due time, and
+                                // the arrival order within the window holds the drain here.
+                                nextKnown.accumulateAndGet(deliverAt, Math::min);
+                                heldBack = true;
+                                break;
                             }
+                        }
+                        if (!heldBack && nextOffset <= ledger.getLastAddConfirmed()) {
+                            // The batch was truncated but everything read was due: more due
+                            // records may remain in this ledger; fire again as soon as allowed.
+                            nextKnown.accumulateAndGet(cutoff + 1, Math::min);
                         }
                         drainOffsets.put(ledger.getId(), nextOffset);
                     }));
@@ -213,10 +359,37 @@ public final class TopicDelayRouter implements AutoCloseable {
             removeWindowLedger(ledgerId);
         }
 
-        if (rewrites.isEmpty()) {
-            return CompletableFuture.completedFuture(null);
+        CompletableFuture<Void> done = rewrites.isEmpty()
+                ? CompletableFuture.completedFuture(null)
+                : CompletableFuture.allOf(rewrites.toArray(new CompletableFuture[0]));
+        return done.whenComplete((__, ex) -> {
+            if (ex != null) {
+                // A failed round read an unknown subset of the windows: fire again as soon as
+                // the tick floor allows.
+                nextDeliverAt.accumulateAndGet(cutoff + 1, Math::min);
+            } else {
+                recomputeNextDeliverAt(version, cutoff, nextKnown.get());
+            }
+        });
+    }
+
+    /**
+     * Raises the next-due floor to what a completed round knows. When an append became visible
+     * during the round (version changed), the floor may only be lowered to {@code cutoff + 1}:
+     * a racing append's {@code deliverAt} is past the round's cutoff — routing only appends
+     * future deliveries — so the timer fires no later than that append's due time, at worst one
+     * early no-op round earlier.
+     */
+    private void recomputeNextDeliverAt(long version, long cutoff, long drainedFloor) {
+        for (;;) {
+            long current = nextDeliverAt.get();
+            long target = appendVersion.get() == version
+                    ? drainedFloor
+                    : Math.min(Math.max(current, cutoff + 1), drainedFloor);
+            if (current == target || nextDeliverAt.compareAndSet(current, target)) {
+                return;
+            }
         }
-        return CompletableFuture.allOf(rewrites.toArray(new CompletableFuture[0]));
     }
 
     private void removeWindowLedger(long ledgerId) {
@@ -264,6 +437,13 @@ public final class TopicDelayRouter implements AutoCloseable {
     @Override
     public void close() {
         if (closed.compareAndSet(false, true)) {
+            synchronized (timerLock) {
+                if (armedTimer != null) {
+                    armedTimer.cancel(false);
+                    armedTimer = null;
+                }
+                currentTarget = Long.MAX_VALUE;
+            }
 
             List<Long> ledgerIds = new ArrayList<>(
                     windowLedgers.values().stream().map(WriteHandle::getId).toList());
