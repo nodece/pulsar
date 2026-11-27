@@ -18,37 +18,62 @@
  */
 package org.apache.pulsar.broker.delayed.bucket.journal;
 
+import com.google.common.annotations.VisibleForTesting;
 import io.netty.buffer.ByteBuf;
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
+import java.util.NavigableSet;
 import java.util.concurrent.atomic.LongAdder;
 import lombok.CustomLog;
+import org.apache.bookkeeper.mledger.AsyncCallbacks;
+import org.apache.bookkeeper.mledger.Entry;
+import org.apache.bookkeeper.mledger.ManagedCursor;
+import org.apache.bookkeeper.mledger.ManagedLedgerException;
+import org.apache.bookkeeper.mledger.Position;
+import org.apache.bookkeeper.mledger.PositionFactory;
+import org.apache.bookkeeper.mledger.impl.EntryImpl;
 import org.apache.pulsar.broker.delayed.DelayedDeliveryContext;
 import org.apache.pulsar.broker.delayed.bucket.BucketDelayedDeliveryTracker;
 import org.apache.pulsar.broker.delayed.bucket.BucketSnapshotStorage;
 import org.apache.pulsar.broker.delayed.bucket.RecoverDelayedDeliveryTrackerException;
 
 /**
- * A bucket tracker that additionally copies every delayed entry into an append-only journal, in
- * arrival order, at the only point where the broker holds the entry buffer
- * ({@code trackDelayedDelivery}). The journal is the write-side experiment of the body-copy
- * design: due delivery still runs on the inherited bucket machinery (index + replay from the data
- * ledgers), so the extra sequential writes are measurable on their own before the read side
- * switches over.
+ * A bucket tracker that also copies every delayed entry into time-window journal ledgers and
+ * serves due delivery from those journals sequentially, so the due path performs no random read on
+ * the data ledgers. The copy is taken at the only point where the broker holds the entry buffer
+ * ({@code trackDelayedDelivery}) and routed to the ledger of the entry's delivery window.
  *
- * <p>Not durable across restarts: the journal ledgers are not recorded in cursor properties and
- * the read side does not use them yet, so a restart leaves them behind. This is an experiment
- * scaffold, not a production feature.
+ * <p>Due delivery is journal-driven: the drain reads the current windows' ledgers in journal
+ * order, and a record is served only when its position is still tracked by the inherited index
+ * ({@code removeIndexBit}) and not acknowledged — the index bitmap is the single source of
+ * truth for what is pending, so journal and regular delivery cannot double-deliver. Whatever the
+ * index still reports as due after the drain (a failed or still-in-flight journal copy) is
+ * replayed from the data ledgers through the regular cursor path and merged into the same
+ * completion.
+ *
+ * <p>Entries are wrapped with their original positions, so acknowledgements, cursors and the
+ * redelivery bookkeeping are unchanged.
+ *
+ * <p>Not durable across restarts: the journal ledgers and drain offsets are not recorded in
+ * cursor properties, so a restart falls back to the inherited delivery entirely (the journal
+ * copies are abandoned). This is an experiment, not a production feature.
  */
 @CustomLog
 public class JournalingBucketDelayedDeliveryTracker extends BucketDelayedDeliveryTracker {
+
+    /** How many journal records one dispatch round reads at most. */
+    static final int DRAIN_BATCH = 500;
+
+    private static final int MAX_RECORDED_FAILURES = 100;
 
     private final JournalStorage journalStorage;
 
     private final LongAdder journaledEntries = new LongAdder();
     private final LongAdder journaledBytes = new LongAdder();
     private final LongAdder journalFailures = new LongAdder();
+    private final LongAdder journalDelivered = new LongAdder();
+    private final LongAdder journalFallbackDelivered = new LongAdder();
 
     JournalingBucketDelayedDeliveryTracker(DelayedDeliveryContext context,
             io.netty.util.Timer timer, long tickTimeMillis, Clock clock,
@@ -64,15 +89,15 @@ public class JournalingBucketDelayedDeliveryTracker extends BucketDelayedDeliver
     }
 
     /**
-     * Copies the serialized entry into the journal. The buffer belongs to the caller and is only
-     * read here; the copy is framed and released inside the journal storage.
+     * Copies the serialized entry into its delivery window's journal. The buffer belongs to the
+     * caller and is only read here; the copy is framed and released inside the journal storage.
      */
     @Override
     public void addEntry(long ledgerId, long entryId, long deliveryAt, ByteBuf entryData) {
         JournalStorage storage = journalStorage;
         if (storage == null) {
             // The journal was never started (or already closed): count it and move on, the
-            // inherited tracking already accepted the message and delivery is unaffected.
+            // inherited tracking already accepted the message; its delivery uses the fallback.
             journalFailures.increment();
             return;
         }
@@ -81,16 +106,107 @@ public class JournalingBucketDelayedDeliveryTracker extends BucketDelayedDeliver
                 .whenComplete((journalLedgerId, ex) -> {
                     if (ex != null) {
                         journalFailures.increment();
-                        log.warn()
-                                .attr("ledgerId", ledgerId).attr("entryId", entryId)
-                                .exceptionMessage(ex)
-                                .log("Failed to journal the delayed entry;"
-                                        + " delivery is unaffected");
+                        if (journalFailures.sum() <= MAX_RECORDED_FAILURES) {
+                            log.warn()
+                                    .attr("ledgerId", ledgerId).attr("entryId", entryId)
+                                    .exceptionMessage(ex)
+                                    .log("Failed to journal the delayed entry;"
+                                            + " its delivery falls back to the data-ledger replay");
+                        }
                     } else {
                         journaledEntries.increment();
                         journaledBytes.add(readableBytes);
                     }
                 });
+    }
+
+    /**
+     * Serves one dispatch round. The journal drain runs first: every drained record whose
+     * position the index still tracks and the cursor has not acknowledged becomes an entry,
+     * wrapped with its original position. Then the inherited {@link #getScheduledMessages(int)}
+     * reports what is still due after the drain — the copies the journal does not have — and the
+     * regular cursor replay reads them from the data ledgers. Both sources merge into a single
+     * {@code readEntriesComplete} on the dispatcher's callback; a journal read failure falls the
+     * whole round back to the regular replay.
+     */
+    public void readDueAndReplay(ManagedCursor cursor, AsyncCallbacks.ReadEntriesCallback callback,
+            Object ctx, int maxMessages) {
+        JournalStorage storage = journalStorage;
+        if (storage == null) {
+            replayFromDataLedgers(cursor, callback, ctx, maxMessages);
+            return;
+        }
+
+        long cutoff = clock.millis();
+        storage.readDue(cutoff, DRAIN_BATCH).whenComplete((records, ex) -> {
+            if (ex != null) {
+                log.warn().exceptionMessage(ex)
+                        .log("Failed to read the delayed-delivery journal;"
+                                + " the round falls back to the data-ledger replay");
+                replayFromDataLedgers(cursor, callback, ctx, maxMessages);
+                return;
+            }
+
+            List<Entry> journalEntries = new ArrayList<>();
+            for (JournalStorage.JournalRecord record : records) {
+                Position position = PositionFactory.create(record.dataLedgerId(), record.dataEntryId());
+                if (cursor.isMessageDeleted(position)) {
+                    // The original was acknowledged (or the subscription reset): drop the copy.
+                    continue;
+                }
+                // The index is the single source of pending truth: serving the copy and untracking
+                // the position are one step, so neither delivery path can serve it twice.
+                if (removeIndexBit(position.getLedgerId(), position.getEntryId())) {
+                    journalEntries.add(EntryImpl.create(position, record.entryData(), 0));
+                    journalDelivered.increment();
+                }
+                // else: already untracked (delivered by an earlier round or never journaled
+                // through this tracker) — skip.
+            }
+
+            // What the index still reports as due is exactly what the drain could not serve.
+            NavigableSet<Position> remaining = getScheduledMessages(maxMessages);
+            if (remaining.isEmpty()) {
+                complete(journalEntries, callback, ctx);
+                return;
+            }
+
+            cursor.asyncReplayEntries(remaining, new AsyncCallbacks.ReadEntriesCallback() {
+                @Override
+                public void readEntriesComplete(List<Entry> entries, Object replayCtx) {
+                    List<Entry> merged = new ArrayList<>(journalEntries.size() + entries.size());
+                    merged.addAll(journalEntries);
+                    merged.addAll(entries);
+                    journalFallbackDelivered.add(entries.size());
+                    merged.sort((a, b) -> a.getPosition().compareTo(b.getPosition()));
+                    callback.readEntriesComplete(merged, replayCtx);
+                }
+
+                @Override
+                public void readEntriesFailed(ManagedLedgerException exception, Object replayCtx) {
+                    // The journal part succeeded but the fallback did not: release the copies and
+                    // fail the round; the dispatcher retries the whole round on the regular path.
+                    journalEntries.forEach(Entry::release);
+                    callback.readEntriesFailed(exception, replayCtx);
+                }
+            }, ctx, true);
+        });
+    }
+
+    /** The regular path: everything due comes from the data ledgers, as in the bucket tracker. */
+    private void replayFromDataLedgers(ManagedCursor cursor, AsyncCallbacks.ReadEntriesCallback callback,
+            Object ctx, int maxMessages) {
+        NavigableSet<Position> due = getScheduledMessages(maxMessages);
+        if (due.isEmpty()) {
+            complete(List.of(), callback, ctx);
+            return;
+        }
+        cursor.asyncReplayEntries(due, callback, ctx, true);
+    }
+
+    private static void complete(List<Entry> entries, AsyncCallbacks.ReadEntriesCallback callback,
+            Object ctx) {
+        callback.readEntriesComplete(entries, ctx);
     }
 
     long journaledEntries() {
@@ -105,16 +221,24 @@ public class JournalingBucketDelayedDeliveryTracker extends BucketDelayedDeliver
         return journalFailures.sum();
     }
 
-    List<Long> journalLedgerIds() {
-        return journalStorage.journalLedgerIds();
+    long journalDelivered() {
+        return journalDelivered.sum();
     }
 
-    CompletableFuture<org.apache.bookkeeper.client.api.LedgerEntries> readJournal(
-            long ledgerId, long firstEntry, long lastEntry) {
-        return journalStorage.read(ledgerId, firstEntry, lastEntry);
+    long journalFallbackDelivered() {
+        return journalFallbackDelivered.sum();
+    }
+
+    @VisibleForTesting
+    JournalStorage journalStorageForTest() {
+        return journalStorage;
     }
 
     static long headerSize() {
         return JournalStorage.HEADER_SIZE;
+    }
+
+    static long windowOf(long deliverAt) {
+        return JournalStorage.windowOf(deliverAt);
     }
 }

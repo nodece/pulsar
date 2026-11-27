@@ -1007,7 +1007,7 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
         return FutureUtil.waitForAll(futures);
     }
 
-    private boolean removeIndexBit(long ledgerId, long entryId) {
+    protected boolean removeIndexBit(long ledgerId, long entryId) {
         return index.untrack(ledgerId, entryId);
     }
 
