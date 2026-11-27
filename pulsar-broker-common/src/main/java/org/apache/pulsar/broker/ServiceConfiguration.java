@@ -509,6 +509,13 @@ public class ServiceConfiguration implements PulsarConfiguration {
             The default value is 0 which means there is no limit on the max delivery delay.""")
     private long delayedDeliveryMaxDelayInMillis = 0;
 
+    @FieldContext(category = CATEGORY_SERVER, doc = """
+            Route delayed messages to a time-windowed delay storage instead of the data ledger,
+            and rewrite them to the topic's tail when due. The consumer always reads sequentially,
+            with no holes. The producer receives the delay-storage position as its messageId,
+            not the data-ledger position. Default is false.""")
+    private boolean delayedDeliveryWriteRoutingEnabled = false;
+
     @FieldContext(category = CATEGORY_SERVER, doc = "Whether to enable the acknowledge of batch local index")
     private boolean acknowledgmentAtBatchIndexLevelEnabled = true;
 

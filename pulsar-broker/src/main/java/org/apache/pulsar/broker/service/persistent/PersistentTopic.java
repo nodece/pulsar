@@ -105,6 +105,7 @@ import org.apache.commons.lang3.mutable.MutableBoolean;
 import org.apache.commons.lang3.mutable.MutableInt;
 import org.apache.pulsar.broker.PulsarServerException;
 import org.apache.pulsar.broker.delayed.BucketDelayedDeliveryTrackerFactory;
+import org.apache.pulsar.broker.delayed.routing.TopicDelayRouter;
 import org.apache.pulsar.broker.delayed.DelayedDeliveryTrackerFactory;
 import org.apache.pulsar.broker.loadbalance.extensions.ExtensibleLoadManagerImpl;
 import org.apache.pulsar.broker.loadbalance.extensions.channel.ServiceUnitStateDataConflictResolver;
@@ -273,6 +274,9 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
     public static final int MESSAGE_RATE_BACKOFF_MS = 1000;
 
     protected final MessageDeduplication messageDeduplication;
+
+    /** Routes delayed messages to the delay storage when write routing is enabled; null otherwise. */
+    private volatile TopicDelayRouter delayRouter;
 
     private static final Long COMPACTION_NEVER_RUN = -0xfebecffeL;
     volatile CompletableFuture<Long> currentCompaction = CompletableFuture.completedFuture(
@@ -697,6 +701,7 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
 
     @Override
     public void publishMessage(ByteBuf headersAndPayload, PublishContext publishContext) {
+        maybeInitDelayRouter();
         pendingWriteOps.incrementAndGet();
         if (isFenced) {
             publishContext.completed(new TopicFencedException("fenced"), -1, -1);
@@ -715,6 +720,25 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
                                     getDelayedDeliveryMaxDelayInMillis())), -1, -1);
             decrementPendingWriteOpsAndCheck();
             return;
+        }
+
+        TopicDelayRouter router = delayRouter;
+        if (router != null) {
+            long deliverAtTime = getDeliverAtTime(headersAndPayload);
+            if (deliverAtTime > System.currentTimeMillis()) {
+                router.append(deliverAtTime, headersAndPayload)
+                        .whenComplete((position, ex) -> {
+                            if (ex != null) {
+                                publishContext.completed(
+                                        new NotAllowedException("Failed to route delayed message: "
+                                                + ex.getMessage()), -1, -1);
+                            } else {
+                                publishContext.completed(null, position[0], position[1]);
+                            }
+                            decrementPendingWriteOpsAndCheck();
+                        });
+                return;
+            }
         }
 
         MessageDeduplication.MessageDupStatus status =
@@ -5788,6 +5812,42 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
 
     public Optional<TopicName> getShadowSourceTopic() {
         return Optional.ofNullable(shadowSourceTopic);
+    }
+
+    /** Initializes the delay router lazily on the first publish when write routing is enabled. */
+    private void maybeInitDelayRouter() {
+        if (delayRouter == null && isDelayedDeliveryEnabled()
+                && brokerService.pulsar().getConfiguration().isDelayedDeliveryWriteRoutingEnabled()) {
+            synchronized (this) {
+                if (delayRouter == null) {
+                    try {
+                        TopicDelayRouter router = new TopicDelayRouter(this, brokerService.pulsar());
+                        router.start();
+                        this.delayRouter = router;
+                        log.info()
+                                .attr("topic", topic)
+                                .log("Delay write routing enabled: delayed messages go to the delay storage");
+                    } catch (Exception e) {
+                        log.error()
+                                .attr("topic", topic)
+                                .exceptionMessage(e)
+                                .log("Failed to initialize the delay router; delayed messages"
+                                        + " use the regular in-ledger tracking");
+                    }
+                }
+            }
+        }
+    }
+
+    /** Returns the deliverAtTime from the message metadata, or 0 when absent. */
+    private long getDeliverAtTime(ByteBuf headersAndPayload) {
+        headersAndPayload.markReaderIndex();
+        try {
+            MessageMetadata msgMetadata = Commands.parseMessageMetadata(headersAndPayload);
+            return msgMetadata.hasDeliverAtTime() ? msgMetadata.getDeliverAtTime() : 0;
+        } finally {
+            headersAndPayload.resetReaderIndex();
+        }
     }
 
     protected boolean isExceedMaximumDeliveryDelay(ByteBuf headersAndPayload) {
