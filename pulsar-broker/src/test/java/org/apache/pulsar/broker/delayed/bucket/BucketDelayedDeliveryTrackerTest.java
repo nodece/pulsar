@@ -44,6 +44,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
@@ -613,6 +614,121 @@ public class BucketDelayedDeliveryTrackerTest extends AbstractDeliveryTrackerTes
         }
 
         tracker.close();
+    }
+
+    /**
+     * Storage whose snapshot creations wait for a gate, so segments are served from the resident
+     * in-memory list while the create is still in flight; releasing the gate exceptionally makes
+     * the create fail and downgrades the bucket to memory mode.
+     */
+    private static class GatedFailingCreateStorage extends MockBucketSnapshotStorage {
+        final CompletableFuture<Void> createGate = new CompletableFuture<>();
+
+        @Override
+        public CompletableFuture<Long> createBucketSnapshot(SnapshotMetadata snapshotMetadata,
+                                                            List<SnapshotSegment> bucketSnapshotSegments,
+                                                            String bucketKey, String topicName, String cursorName) {
+            return createGate.thenCompose(
+                    __ -> FutureUtil.failedFuture(new BucketSnapshotPersistenceException("Create failed")));
+        }
+    }
+
+    /**
+     * Storage whose second snapshot segment read waits for a gate, so the first segment can be
+     * loaded and delivered while the second one is still in flight.
+     */
+    private static class GateSecondSegmentLoadStorage extends MockBucketSnapshotStorage {
+        final CompletableFuture<Void> secondSegmentGate = new CompletableFuture<>();
+
+        @Override
+        public CompletableFuture<List<SnapshotSegment>> getBucketSnapshotSegment(long bucketId,
+                long firstSegmentEntryId, long lastSegmentEntryId) {
+            CompletableFuture<List<SnapshotSegment>> future = super.getBucketSnapshotSegment(bucketId,
+                    firstSegmentEntryId, lastSegmentEntryId);
+            if (firstSegmentEntryId == 2) {
+                return secondSegmentGate.thenCompose(__ -> future);
+            }
+            return future;
+        }
+    }
+
+    @Test
+    public void testCreateFailDowngradeAfterResidentDeliveryDeliversEachMessageOnce() throws Exception {
+        GatedFailingCreateStorage storage = new GatedFailingCreateStorage();
+        TrackerWithStorage ts = createTrackerWithMockLedger(0L, 50, storage);
+        try {
+            for (int i = 1; i <= 6; i++) {
+                ts.tracker.addMessage(i, i, 10L * i);
+            }
+            Awaitility.await().untilAsserted(() ->
+                    assertEquals(ts.tracker.getImmutableBuckets().asMapOfRanges().size(), 1));
+
+            // Everything is due while the create is still gated: the segments are served from
+            // the resident list and delivered in order.
+            ts.clockTime.set(60);
+            NavigableSet<Position> delivered = new TreeSet<>();
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+                delivered.addAll(ts.tracker.getScheduledMessages(10));
+                assertEquals(delivered.size(), 6);
+            });
+            for (int i = 1; i <= 6; i++) {
+                assertEquals(delivered.pollFirst(), PositionFactory.create(i, i));
+            }
+
+            // The create fails once the gate releases; the downgrade re-queues every segment,
+            // but the delivered positions are already untracked, so nothing is delivered twice.
+            storage.createGate.completeExceptionally(new IllegalStateException("release"));
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() ->
+                    assertEquals(ts.tracker.getImmutableBuckets().asMapOfRanges().size(), 0));
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+                assertTrue(ts.tracker.getScheduledMessages(10).isEmpty(),
+                        "The re-queued segments must not deliver anything twice");
+                assertEquals(ts.tracker.getNumberOfDelayedMessages(), 0);
+            });
+        } finally {
+            ts.close();
+        }
+    }
+
+    @Test
+    public void testProgressiveDeliveryWhileLaterSegmentLoads() throws Exception {
+        // The first segment's position must be delivered while the second segment's read is still
+        // in flight: a pending load only holds back positions at or after its earliest timestamp,
+        // so catch-up does not serialize on the whole due window.
+        GateSecondSegmentLoadStorage storage = new GateSecondSegmentLoadStorage();
+        TrackerWithStorage ts = createTrackerWithMockLedger(0L, 50, storage);
+        try {
+            for (int i = 1; i <= 6; i++) {
+                ts.tracker.addMessage(i, i, 10L * i);
+            }
+            Awaitility.await().untilAsserted(() ->
+                    assertEquals(1, ts.tracker.getImmutableBuckets().asMapOfRanges().size()));
+            Awaitility.await().untilAsserted(() ->
+                    ts.tracker.getImmutableBuckets().asMapOfRanges().values().stream()
+                            .allMatch(bucket -> bucket.getSnapshotCreateFuture().orElseThrow().isDone()));
+
+            ts.clockTime.set(1000);
+            NavigableSet<Position> delivered = new TreeSet<>();
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+                delivered.addAll(ts.tracker.getScheduledMessages(10));
+                assertTrue(delivered.contains(PositionFactory.create(1, 1)),
+                        "Segment 1's position must be delivered while segment 2's read is gated");
+            });
+            assertEquals(ts.tracker.getNumberOfDelayedMessages(), 5,
+                    "Only (1,1) delivered while segment 2 is still loading");
+
+            // Release the gate: the rest arrives in timestamp order.
+            storage.secondSegmentGate.complete(null);
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+                delivered.addAll(ts.tracker.getScheduledMessages(10));
+                assertEquals(delivered.size(), 6);
+            });
+            for (int i = 1; i <= 6; i++) {
+                assertEquals(delivered.pollFirst(), PositionFactory.create(i, i));
+            }
+        } finally {
+            ts.close();
+        }
     }
 
     @Test(dataProvider = "delayedTracker")
@@ -1200,10 +1316,13 @@ public class BucketDelayedDeliveryTrackerTest extends AbstractDeliveryTrackerTes
                 5, TimeUnit.MILLISECONDS.toMillis(10), -1, 50);
         try {
             testClockTime.set(1000);
-            tracker.getScheduledMessages(10);
-            Awaitility.await().untilAsserted(() ->
-                    assertEquals(storage.failedSegmentLoadCalls.get(), 4,
-                            "The load should have failed after initial attempt plus retries"));
+            // With lazy segment loading the load is asynchronous and a dispatch round re-enters
+            // getScheduledMessages when it completes, so poll the rounds instead of calling once.
+            Awaitility.await().untilAsserted(() -> {
+                tracker.getScheduledMessages(10);
+                assertEquals(storage.failedSegmentLoadCalls.get(), 4,
+                        "The load should have failed after initial attempt plus retries");
+            });
 
             CompletableFuture<Void> clearFuture = tracker.clear();
             assertFalse("clear() must still wait for the in-flight tracked delete although the "
@@ -1268,8 +1387,11 @@ public class BucketDelayedDeliveryTrackerTest extends AbstractDeliveryTrackerTes
             Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
                 delivered.addAll(ts.tracker.getScheduledMessages(10));
                 assertEquals(delivered.size(), 6);
+                // The drained bucket's snapshot delete fires on the dispatch round after the last
+                // delivery, so it belongs in the polled condition.
+                assertEquals(storage.deleteCalls.get(), 1,
+                        "The drained bucket should start the snapshot delete");
             });
-            assertEquals(storage.deleteCalls.get(), 1, "The terminal segment load should start the snapshot delete");
             assertFalse("The terminal delete should still be in flight", storage.deleteGate.isDone());
         } finally {
             storage.deleteGate.complete(null);
@@ -1418,8 +1540,10 @@ public class BucketDelayedDeliveryTrackerTest extends AbstractDeliveryTrackerTes
                 producer.close();
             }
 
-            // The snapshot delete succeeds but every property-removal attempt hits BadVersion, so only
-            // the cursor property is left behind.
+            // The snapshot delete succeeds but the property-removal attempts hit BadVersion first.
+            // The drained-bucket cleanup is retried from every dispatch round, so a later retry
+            // consumes the failures and removes the residual property without waiting for the
+            // tracker to be recreated.
             String bucketKey = BucketDelayedDeliveryTracker.DELAYED_BUCKET_KEY_PREFIX + "_1_5";
             BucketDelayedDeliveryTracker tracker = new BucketDelayedDeliveryTracker(
                     testDispatcher, timer, 100000, testClock, true, storage,
@@ -1428,10 +1552,11 @@ public class BucketDelayedDeliveryTrackerTest extends AbstractDeliveryTrackerTes
                 testClockTime.set(1000);
                 Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
                     tracker.getScheduledMessages(10);
-                    assertTrue(propertyRemoveCalls.get() >= 4);
+                    assertTrue(propertyRemoveCalls.get() >= 5,
+                            "4 injected failures consumed plus one successful removal");
+                    assertFalse(cursor.getCursorProperties().containsKey(bucketKey));
                 });
-                assertTrue(cursor.getCursorProperties().containsKey(bucketKey),
-                        "The property should survive the failed removal");
+                assertEquals(tracker.getImmutableBuckets().asMapOfRanges().size(), 0);
             } finally {
                 tracker.close();
             }
@@ -1818,24 +1943,22 @@ public class BucketDelayedDeliveryTrackerTest extends AbstractDeliveryTrackerTes
 
     @Test
     public void testGetScheduledMessagesWhenAllOrphaned() throws Exception {
-        // Reproduces IAE in nextDeliveryTime: when every delayed message lies below the
-        // mark-delete position, the filter in getScheduledMessages pops the in-memory
-        // messages without returning them. If the immutable bucket has additional messages
-        // still in storage (later snapshot segments), numberDelayedMessages stays > 0
-        // while both the mutable bucket and the shared priority queue are empty.
-        // The trailing updateTimer -> nextDeliveryTime must not throw.
+        // When every delayed message lies below the mark-delete position, the filter in
+        // getScheduledMessages pops messages without returning them. With lazy segment
+        // loading the next due segment keeps being loaded and skipped, until the bucket is
+        // drained and deleted; nextDeliveryTime and hasMessageAvailable must behave throughout.
         long firstLedgerId = 50L;
         TrackerWithStorage ts = createTrackerWithMockLedger(firstLedgerId, 50);
 
         // Five delayed messages on the same orphaned ledger (ledgerId < firstLedgerId).
         // They share a mutable bucket because seal requires a strictly greater ledgerId.
         // Timestamps are 100ms apart so each lands in its own snapshot segment
-        // (timeStep=10ms); only the first segment is loaded into the shared queue at seal.
+        // (timeStep=10ms).
         for (int i = 1; i <= 5; i++) {
             ts.tracker.addMessage(1, i, i * 100);
         }
         // A new orphaned ledgerId triggers the seal, producing immutable bucket [1..1]
-        // with 5 messages across 5 segments; shared queue holds just the first segment.
+        // with 5 messages across 5 segments; no segment is resident after the seal.
         ts.tracker.addMessage(2, 1, 600);
 
         Awaitility.await().untilAsserted(() ->
@@ -1843,20 +1966,27 @@ public class BucketDelayedDeliveryTrackerTest extends AbstractDeliveryTrackerTes
                         .noneMatch(x -> x.merging)));
 
         // In strict deliver-at mode getCutoffTime() is just clock.millis(), so advancing the
-        // clock past the trigger message's deliverAt (600) is enough for
-        // moveScheduledMessageToSharedQueue to flush the mutable bucket into the shared queue.
+        // clock past every deliverAt makes all segments due.
         ts.clockTime.set(700);
 
-        // Both queues end up empty (filter pops the two in-memory messages), but
-        // numberDelayedMessages is still 4 (segments 2..5 remain in storage).
-        NavigableSet<Position> scheduledMessages = ts.tracker.getScheduledMessages(10);
-        assertTrue(scheduledMessages.isEmpty(),
-                "Orphaned messages should be filtered out, not returned");
-        assertTrue(ts.tracker.getNumberOfDelayedMessages() > 0,
-                "Remaining storage-only messages should keep the counter > 0");
+        // Each dispatch round loads one due segment and skips its orphaned messages; driving
+        // the rounds to completion drains and deletes the bucket.
+        Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+            NavigableSet<Position> scheduledMessages = ts.tracker.getScheduledMessages(10);
+            assertTrue(scheduledMessages.isEmpty(),
+                    "Orphaned messages should be filtered out, not returned");
+            assertEquals(ts.tracker.getNumberOfDelayedMessages(), 0,
+                    "All storage-only messages should be skipped once every segment is loaded");
+        });
+        Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+            // Keep driving dispatch rounds: the drained bucket is deleted from getScheduledMessages.
+            ts.tracker.getScheduledMessages(10);
+            assertEquals(ts.tracker.getImmutableBuckets().asMapOfRanges().size(), 0,
+                    "The drained bucket should be deleted");
+        });
 
-        // hasMessageAvailable calls nextDeliveryTime while numberDelayedMessages > 0;
-        // it must not throw IAE.
+        // hasMessageAvailable calls nextDeliveryTime while numberDelayedMessages == 0;
+        // it must not throw.
         assertFalse(ts.tracker.hasMessageAvailable());
 
         ts.close();
@@ -2181,27 +2311,190 @@ public class BucketDelayedDeliveryTrackerTest extends AbstractDeliveryTrackerTes
             Awaitility.await().untilAsserted(() -> assertTrue(tracker.getImmutableBuckets().asMapOfRanges().values()
                     .stream().allMatch(bucket -> bucket.getSnapshotCreateFuture().get().isDone())));
 
-            // All messages are due. Reaching the end of the first segment starts loading the second one, and the
-            // loaded segment's messages must be dispatched without waiting for the timer.
+            // All messages are due. The first dispatch round loads the first snapshot segment and
+            // delivers the in-memory message; the loaded segment's messages must be dispatched
+            // without waiting for the timer.
             testClockTime.set(1000);
-            // A triggered dispatch round can run at once: run the first one right away, and keep what it gets
-            AtomicBoolean roundTriggered = new AtomicBoolean();
-            CompletableFuture<NavigableSet<Position>> firstRound = new CompletableFuture<>();
+            // Triggered dispatch rounds can run at once: collect what they deliver. With batch
+            // loading one round may still be arming further due segments, so accumulate.
+            List<Position> triggeredDeliveries = Collections.synchronizedList(new ArrayList<>());
             doAnswer(invocation -> {
-                if (roundTriggered.compareAndSet(false, true)) {
-                    firstRound.complete(tracker.getScheduledMessages(10));
-                }
+                triggeredDeliveries.addAll(tracker.getScheduledMessages(10));
                 return null;
             }).when(testDispatcher).readMoreEntriesAsync();
-            // The first segment's message is its last one: it waits for the second segment to load
-            assertTrue(tracker.getScheduledMessages(10).isEmpty());
+            // The snapshot segment read is still gated, so this round arms the load and delivers
+            // nothing below the barrier: the mutable message's timestamp is at or after the gated
+            // segment's earliest timestamp, so it waits for the load-triggered round to keep both
+            // sources position-ordered.
+            NavigableSet<Position> firstScheduled = tracker.getScheduledMessages(10);
+            assertEquals(firstScheduled.size(), 0);
             segmentReads.complete(null);
-            // The round that the load triggers gets it
-            assertThat(firstRound.get(10, TimeUnit.SECONDS)).contains(PositionFactory.create(1, 1));
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+                assertThat(triggeredDeliveries).contains(PositionFactory.create(1, 1));
+                assertThat(triggeredDeliveries).contains(PositionFactory.create(6, 6));
+            });
 
             tracker.close();
         } finally {
             storage.clean();
+        }
+    }
+
+    @Test
+    public void testSealedBucketSegmentsLoadLazily() throws Exception {
+        TrackerWithStorage ts = createTrackerWithMockLedger(0L, 50);
+        try {
+            for (int i = 1; i <= 6; i++) {
+                ts.tracker.addMessage(i, i, 100L * i);
+            }
+            // Bucket [1..5] is sealed and message (6, 6) stays in the mutable bucket.
+            Awaitility.await().untilAsserted(() ->
+                    assertEquals(ts.tracker.getImmutableBuckets().asMapOfRanges().size(), 1));
+            assertEquals(ts.tracker.getSharedBucketPriorityQueue().size(), 0,
+                    "No segment may be resident in the shared queue after sealing");
+            assertEquals(ts.tracker.getNumberOfDelayedMessages(), 6);
+
+            // The lazy head (the first segment's earliest timestamp) must drive
+            // nextDeliveryTime even though no segment is loaded.
+            ts.clockTime.set(10);
+            assertFalse(ts.tracker.hasMessageAvailable());
+            ts.clockTime.set(100);
+            assertTrue(ts.tracker.hasMessageAvailable());
+
+            // Once everything is due, segments are loaded one per dispatch round and all
+            // messages are delivered in timestamp order.
+            ts.clockTime.set(1000);
+            NavigableSet<Position> delivered = new TreeSet<>();
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+                delivered.addAll(ts.tracker.getScheduledMessages(10));
+                assertEquals(delivered.size(), 6);
+            });
+            for (int i = 1; i <= 6; i++) {
+                assertEquals(delivered.pollFirst(), PositionFactory.create(i, i));
+            }
+            assertEquals(ts.tracker.getNumberOfDelayedMessages(), 0);
+
+            // The drained bucket is deleted from a subsequent dispatch round.
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+                ts.tracker.getScheduledMessages(10);
+                assertEquals(ts.tracker.getImmutableBuckets().asMapOfRanges().size(), 0,
+                        "The drained bucket should be deleted");
+            });
+        } finally {
+            ts.close();
+        }
+    }
+
+    @Test
+    public void testRecoveryKeepsSegmentsLazy() throws Exception {
+        MockBucketSnapshotStorage storage = new MockBucketSnapshotStorage();
+        storage.start();
+        ManagedCursor cursor = new MockManagedCursor("test_lazy_recover_cursor");
+        AbstractPersistentDispatcherMultipleConsumers testDispatcher =
+                mock(AbstractPersistentDispatcherMultipleConsumers.class);
+        Clock testClock = mock(Clock.class);
+        AtomicLong testClockTime = new AtomicLong();
+        when(testClock.millis()).then(x -> testClockTime.get());
+        doReturn(cursor).when(testDispatcher).getCursor();
+        doReturn("persistent://public/default/testLazyRecover / " + cursor.getName())
+                .when(testDispatcher).getName();
+        try {
+            BucketDelayedDeliveryTracker producer = new BucketDelayedDeliveryTracker(
+                    testDispatcher, mock(Timer.class), 100000, testClock, true, storage,
+                    5, TimeUnit.MILLISECONDS.toMillis(10), -1, 50);
+            for (int i = 1; i <= 6; i++) {
+                producer.addMessage(i, i, 100L * i);
+            }
+            Awaitility.await().untilAsserted(() ->
+                    assertEquals(producer.getImmutableBuckets().asMapOfRanges().size(), 1));
+            producer.close();
+
+            // Reopen while nothing is due: recovery restores bitmaps and per-segment timestamps
+            // but must not load any segment into the shared queue.
+            BucketDelayedDeliveryTracker tracker = new BucketDelayedDeliveryTracker(
+                    testDispatcher, mock(Timer.class), 100000, testClock, true, storage,
+                    5, TimeUnit.MILLISECONDS.toMillis(10), -1, 50);
+            try {
+                assertEquals(tracker.getSharedBucketPriorityQueue().size(), 0,
+                        "Recovery must not load any segment eagerly");
+                assertEquals(tracker.getNumberOfDelayedMessages(), 5,
+                        "Only the sealed bucket's messages are recovered (the mutable one is not persisted)");
+
+                testClockTime.set(1000);
+                NavigableSet<Position> delivered = new TreeSet<>();
+                Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+                    delivered.addAll(tracker.getScheduledMessages(10));
+                    assertEquals(delivered.size(), 5);
+                });
+                for (int i = 1; i <= 5; i++) {
+                    assertEquals(delivered.pollFirst(), PositionFactory.create(i, i));
+                }
+                Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+                    tracker.getScheduledMessages(10);
+                    assertEquals(tracker.getImmutableBuckets().asMapOfRanges().size(), 0,
+                            "The drained bucket should be deleted");
+                });
+            } finally {
+                tracker.close();
+            }
+        } finally {
+            storage.clean();
+        }
+    }
+
+    @Test
+    public void testDrainedBucketDeletedWhileAnotherBucketHasFutureSegments() throws Exception {
+        // Bucket A [1..1] (5 messages, 5 segments, all due at cutoff 550) must be deleted once
+        // drained, even though buckets B [2..2] and C [3..3] still hold unloaded segments whose
+        // earliest timestamp lies in the future. The loadDueSegments fast path skips the
+        // per-bucket scan when the global minimum unloaded timestamp is in the future, which also
+        // starves the drained-bucket cleanup.
+        TrackerWithStorage ts = createTrackerWithMockLedger(0L, 50);
+        try {
+            // Bucket A: ledger 1, 5 messages in 5 segments (100..500).
+            for (int i = 1; i <= 5; i++) {
+                ts.tracker.addMessage(1, i, 100L * i);
+            }
+            ts.tracker.addMessage(2, 1, 600L); // seals A [1..1]
+            // Bucket B: ledger 2, 5 messages in 5 segments (600..1000).
+            for (int i = 2; i <= 5; i++) {
+                ts.tracker.addMessage(2, i, 500L + 100L * i);
+            }
+            ts.tracker.addMessage(3, 1, 1100L); // seals B [2..2]
+            // Bucket C: ledger 3, 5 messages in 5 segments (1100..1500).
+            for (int i = 2; i <= 5; i++) {
+                ts.tracker.addMessage(3, i, 1000L + 100L * i);
+            }
+            ts.tracker.addMessage(4, 1, 1600L); // seals C [3..3]
+
+            Awaitility.await().untilAsserted(() ->
+                    assertEquals(3, ts.tracker.getImmutableBuckets().asMapOfRanges().size()));
+            Awaitility.await().untilAsserted(() ->
+                    ts.tracker.getImmutableBuckets().asMapOfRanges().values().stream()
+                            .allMatch(bucket -> bucket.getSnapshotCreateFuture().orElseThrow().isDone()));
+
+            // Deliver everything of A; B and C stay in the future.
+            ts.clockTime.set(550);
+            NavigableSet<Position> delivered = new TreeSet<>();
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+                delivered.addAll(ts.tracker.getScheduledMessages(10));
+                assertEquals(delivered.size(), 5);
+            });
+            for (int i = 1; i <= 5; i++) {
+                assertEquals(delivered.pollFirst(), PositionFactory.create(1, i));
+            }
+            assertEquals(ts.tracker.getNumberOfDelayedMessages(), 11,
+                    "A delivered; B (5) + C (5) + mutable (4,1) still tracked");
+
+            // A is fully loaded and drained: further dispatch rounds must delete its snapshot even
+            // while the earliest unloaded segment of B/C is still in the future.
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+                ts.tracker.getScheduledMessages(10);
+                assertEquals(2, ts.tracker.getImmutableBuckets().asMapOfRanges().size(),
+                        "Drained bucket A should be deleted");
+            });
+        } finally {
+            ts.close();
         }
     }
 

@@ -306,8 +306,12 @@ public class BucketDelayedDeliveryTest extends DelayedDeliveryTest {
         }).count();
         assertEquals(2, count);
         Optional<Metric> loadedIndexTopicMetrics =
-                bucketsMetrics.stream().filter(metric -> !metric.tags.containsKey("subscription")).findFirst();
+                loadedIndexMetrics.stream().filter(metric -> !metric.tags.containsKey("subscription"))
+                        .findFirst();
         assertTrue(loadedIndexTopicMetrics.isPresent());
+        // With lazy segment loading a sealed bucket holds nothing resident until its earliest
+        // timestamp is due, so each subscription only carries its mutable tail
+        // (101 messages = 2 sealed buckets x 50 + 1 remaining).
         assertEquals(loadedIndexSum.intValue(), loadedIndexTopicMetrics.get().value);
 
         List<Metric> snapshotSizeBytesMetrics =
