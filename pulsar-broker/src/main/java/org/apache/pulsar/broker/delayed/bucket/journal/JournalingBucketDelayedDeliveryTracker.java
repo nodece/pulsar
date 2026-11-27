@@ -60,7 +60,8 @@ import org.apache.pulsar.broker.delayed.bucket.RecoverDelayedDeliveryTrackerExce
  * copies are abandoned). This is an experiment, not a production feature.
  */
 @CustomLog
-public class JournalingBucketDelayedDeliveryTracker extends BucketDelayedDeliveryTracker {
+public class JournalingBucketDelayedDeliveryTracker extends BucketDelayedDeliveryTracker
+        implements org.apache.pulsar.broker.delayed.DueEntryReader {
 
     /** How many journal records one dispatch round reads at most. */
     static final int DRAIN_BATCH = 500;
@@ -68,6 +69,9 @@ public class JournalingBucketDelayedDeliveryTracker extends BucketDelayedDeliver
     private static final int MAX_RECORDED_FAILURES = 100;
 
     private final JournalStorage journalStorage;
+
+    /** The subscription's cursor, captured from the context at construction. */
+    private final ManagedCursor cursor;
 
     private final LongAdder journaledEntries = new LongAdder();
     private final LongAdder journaledBytes = new LongAdder();
@@ -86,6 +90,7 @@ public class JournalingBucketDelayedDeliveryTracker extends BucketDelayedDeliver
                 bucketSnapshotStorage, minIndexCountPerBucket, timeStepPerBucketSnapshotSegmentInMillis,
                 maxIndexesPerBucketSnapshotSegment, maxNumBuckets);
         this.journalStorage = journalStorage;
+        this.cursor = context.getCursor();
     }
 
     /**
@@ -129,11 +134,11 @@ public class JournalingBucketDelayedDeliveryTracker extends BucketDelayedDeliver
      * {@code readEntriesComplete} on the dispatcher's callback; a journal read failure falls the
      * whole round back to the regular replay.
      */
-    public void readDueAndReplay(ManagedCursor cursor, AsyncCallbacks.ReadEntriesCallback callback,
-            Object ctx, int maxMessages) {
+    @Override
+    public void readDueEntries(AsyncCallbacks.ReadEntriesCallback callback, Object ctx, int maxMessages) {
         JournalStorage storage = journalStorage;
         if (storage == null) {
-            replayFromDataLedgers(cursor, callback, ctx, maxMessages);
+            replayFromDataLedgers(callback, ctx, maxMessages);
             return;
         }
 
@@ -143,7 +148,7 @@ public class JournalingBucketDelayedDeliveryTracker extends BucketDelayedDeliver
                 log.warn().exceptionMessage(ex)
                         .log("Failed to read the delayed-delivery journal;"
                                 + " the round falls back to the data-ledger replay");
-                replayFromDataLedgers(cursor, callback, ctx, maxMessages);
+                replayFromDataLedgers(callback, ctx, maxMessages);
                 return;
             }
 
@@ -194,7 +199,7 @@ public class JournalingBucketDelayedDeliveryTracker extends BucketDelayedDeliver
     }
 
     /** The regular path: everything due comes from the data ledgers, as in the bucket tracker. */
-    private void replayFromDataLedgers(ManagedCursor cursor, AsyncCallbacks.ReadEntriesCallback callback,
+    private void replayFromDataLedgers(AsyncCallbacks.ReadEntriesCallback callback,
             Object ctx, int maxMessages) {
         NavigableSet<Position> due = getScheduledMessages(maxMessages);
         if (due.isEmpty()) {

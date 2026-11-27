@@ -55,7 +55,7 @@ import org.apache.commons.lang3.mutable.MutableBoolean;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.delayed.BucketDelayedDeliveryTrackerFactory;
-import org.apache.pulsar.broker.delayed.bucket.journal.JournalingBucketDelayedDeliveryTracker;
+import org.apache.pulsar.broker.delayed.DueEntryReader;
 import org.apache.pulsar.broker.delayed.DelayedDeliveryTracker;
 import org.apache.pulsar.broker.delayed.DelayedDeliveryTrackerFactory;
 import org.apache.pulsar.broker.delayed.InMemoryDelayedDeliveryTracker;
@@ -445,14 +445,14 @@ public class PersistentDispatcherMultipleConsumers extends AbstractPersistentDis
             // read callback, so the scheduling below stays on the regular path.
             Optional<DelayedDeliveryTracker> tracker = delayedDeliveryTracker;
             if (canReplayMessages() && tracker.isPresent()
-                    && tracker.get() instanceof JournalingBucketDelayedDeliveryTracker journalTracker) {
+                    && tracker.get() instanceof DueEntryReader entryReader) {
                 boolean journalReadStarted = false;
                 try {
                     updateMinReplayedPosition();
                     onReadStarted(ReadType.Replay);
                     journalReadStarted = true;
                     havePendingReplayRead = true;
-                    journalTracker.readDueAndReplay(cursor, this, null, messagesToRead);
+                    entryReader.readDueEntries(this, null, messagesToRead);
                 } catch (Throwable failure) {
                     handleReadSchedulingFailure(failure, ReadType.Replay, journalReadStarted);
                     return;
